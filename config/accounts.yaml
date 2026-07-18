@@ -1,0 +1,21 @@
+# PostDoctor マルチアカウント設定
+#
+# account のキー（例: rakuba_ai）はデータ保存先ディレクトリ名にもなる
+# （data/<key>/posts.db, data/<key>/heatmap_*.png, data/<key>/prescription.md）。
+#
+# credential_prefix を指定すると、そのアカウント専用の API 認証情報を
+# .env の <PREFIX>_CONSUMER_KEY / <PREFIX>_CONSUMER_SECRET /
+# <PREFIX>_ACCESS_TOKEN / <PREFIX>_ACCESS_TOKEN_SECRET から読み込む。
+# 省略時はデフォルト（X_ で始まるキー）を共有する。
+
+accounts:
+  rakuba_ai:
+    screen_name: rakuba_ai
+    user_id: "2074065705956454401"
+    # credential_prefix: X   # 省略時は .env の X_CONSUMER_KEY 等を使用
+
+  # 別アカウントを追加する例:
+  # another_account:
+  #   screen_name: another_account
+  #   user_id: "1234567890"
+  #   credential_prefix: ANOTHER   # .env に ANOTHER_CONSUMER_KEY 等を用意

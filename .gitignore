@@ -1,0 +1,17 @@
+# secrets
+.env
+
+# per-account data (SQLite DB, generated heatmaps, prescriptions)
+data/
+
+# python
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,6 @@
+tweepy
+python-dotenv
+pandas
+matplotlib
+pyyaml
+anthropic
