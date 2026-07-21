@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-06-20T00:00:00",
+  "n_races": 1,
+  "races": [
+    {
+      "race_key": "DECOY0001",
+      "kaisai_date": "20260620",
+      "jyo_name": "小倉",
+      "race_num": "01",
+      "distance": 1000,
+      "track_type": "芝",
+      "race_name": "",
+      "horses": [
+        {"pred_rank": 1, "uma_num": 9, "waku_num": 9, "uma_code": "DECOY", "uma_name": "デコイホース", "jockey_code": "J099", "jockey_name": "デコイ", "kinryo_kg": 55.0, "ba_weight": 480, "score": 0.99}
+      ]
+    }
+  ]
+}

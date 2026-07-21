@@ -242,6 +242,7 @@ details.raw pre { white-space: pre-wrap; font-size: 12px; background: var(--surf
 .rs-status-pending { color: var(--text-secondary); }
 .rs-status-sent { color: var(--good, #0ca30c); border-color: var(--good, #0ca30c); }
 .rs-status-skipped { color: var(--text-muted); }
+.rs-nodata { color: var(--text-muted); }
 .rs-original-text { font-size: 13px; color: var(--text-primary); white-space: pre-wrap; margin: 0; }
 .rs-meta { font-size: 12px; color: var(--text-secondary); }
 .rs-draft { background: var(--surface-2); border-radius: 8px; padding: 8px 10px; }
@@ -402,6 +403,13 @@ def _reply_scout_candidate_card(account: Account, ranked: rs_db.RankedCandidate)
             f'<div class="rs-draft"><div class="rs-draft-label">案{i}</div>'
             f'<div class="rs-draft-text">{html.escape(d)}</div></div>'
             for i, d in enumerate(ranked.drafts, start=1)
+        )
+    elif ranked.prediction_status == "予測データ未投入":
+        drafts_html = '<p class="muted rs-nodata">予測データ未投入（対応するRakuba予測が見つかりませんでした）</p>'
+    elif ranked.prediction_status == "時制スキップ":
+        drafts_html = (
+            '<p class="muted rs-nodata">時制スキップ（レース確定後の'
+            'レース前投稿への返信になるため見送りました）</p>'
         )
     else:
         drafts_html = (

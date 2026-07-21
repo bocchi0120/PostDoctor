@@ -21,6 +21,8 @@ from postdoctor.reply_scout import db
 
 JST = timezone(timedelta(hours=9))
 KEYWORDS_PATH = ROOT_DIR / "config" / "keywords.json"
+NG_WORDS_PATH = ROOT_DIR / "config" / "ng_words.json"
+ANALYSIS_TERMS_PATH = ROOT_DIR / "config" / "analysis_terms.json"
 
 TWEET_READ_COST = 0.005
 USER_READ_COST = 0.010
@@ -30,13 +32,31 @@ USER_READ_COST = 0.010
 class ScoutConfig:
     keywords: list[str]
     specific_terms: list[str]
-    hype_terms: list[str]
+    ng_words: list[str]
+    analysis_terms: list[str]
     trusted_authors: list[str]
     daily_read_limit: int
     min_likes: int
     min_replies: int
     top_user_lookup_limit: int
     claude_model: str
+    draft_top_n: int
+    rakuba_output_dir: str
+
+
+def _load_word_list(path, key: str) -> list[str]:
+    """ng_words.json/analysis_terms.jsonのような補助的な語彙リストを読む。
+
+    欠損・壊れていてもスコアリング自体は止めたくないので空リストに縮退する
+    （keywords.json自体が無い場合とは異なり、こちらは無くても動作継続できる）。
+    """
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    return raw.get(key, [])
 
 
 def load_config() -> ScoutConfig:
@@ -46,13 +66,16 @@ def load_config() -> ScoutConfig:
     return ScoutConfig(
         keywords=raw.get("keywords", []),
         specific_terms=raw.get("specific_terms", []),
-        hype_terms=raw.get("hype_terms", []),
+        ng_words=_load_word_list(NG_WORDS_PATH, "ng_words"),
+        analysis_terms=_load_word_list(ANALYSIS_TERMS_PATH, "analysis_terms"),
         trusted_authors=raw.get("trusted_authors", []),
         daily_read_limit=raw.get("daily_read_limit", 50),
         min_likes=raw.get("min_likes", 5),
         min_replies=raw.get("min_replies", 0),
         top_user_lookup_limit=raw.get("top_user_lookup_limit", 15),
         claude_model=raw.get("claude_model", "claude-sonnet-5"),
+        draft_top_n=raw.get("draft_top_n", 5),
+        rakuba_output_dir=raw.get("rakuba_output_dir", ""),
     )
 
 

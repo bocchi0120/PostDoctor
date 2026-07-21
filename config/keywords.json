@@ -1,11 +1,12 @@
 {
   "keywords": ["函館記念", "重賞", "競馬予想"],
   "specific_terms": [],
-  "hype_terms": ["限定", "教える", "必勝", "絶対"],
   "trusted_authors": [],
   "daily_read_limit": 50,
   "min_likes": 5,
   "min_replies": 0,
   "top_user_lookup_limit": 15,
-  "claude_model": "claude-sonnet-5"
+  "claude_model": "claude-sonnet-5",
+  "draft_top_n": 5,
+  "rakuba_output_dir": "C:/Projects/Rakuba/backend/output"
 }

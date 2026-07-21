@@ -1,0 +1,4 @@
+race_key,kaisai_date,jyo_code,kaiji,nichiji,race_num,uma_num,waku_num,chakujun,ijo_kbn,time_sec,agari_sec,ba_weight,ba_weight_diff,jockey_code,uma_code,kinryo_kg,ninki
+TESTRACE0001,20260701,05,1,1,11,1,1,2,0,110.5,34.5,478,-2,J001,H0001,55.0,1
+TESTRACE0001,20260701,05,1,1,11,2,2,5,0,111.2,35.0,458,-2,J002,H0002,54.0,3
+TESTRACE0003,20260705,06,1,1,09,4,4,0,1,0,0,500,0,J004,H0004,57.0,2

@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-06-30T00:00:00",
+  "n_races": 1,
+  "races": [
+    {
+      "race_key": "TESTRACE0001",
+      "kaisai_date": "20260701",
+      "jyo_name": "函館",
+      "race_num": "11",
+      "distance": 1800,
+      "track_type": "芝",
+      "race_name": "テストステークス",
+      "horses": [
+        {"pred_rank": 1, "uma_num": 1, "waku_num": 1, "uma_code": "H0001", "uma_name": "テストホースイチ", "jockey_code": "J001", "jockey_name": "テスト太郎", "kinryo_kg": 55.0, "ba_weight": 480, "score": 0.10}
+      ]
+    }
+  ]
+}

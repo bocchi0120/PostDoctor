@@ -57,7 +57,25 @@ CREATE TABLE IF NOT EXISTS usage_log (
     count INTEGER NOT NULL,
     PRIMARY KEY (date, kind)
 );
+CREATE TABLE IF NOT EXISTS score_factors (
+    candidate_id        TEXT PRIMARY KEY,
+    velocity_norm       REAL,
+    follower_norm       REAL,
+    specificity         REAL,
+    trusted             REAL,
+    analytical          REAL,
+    ng_penalty_applied  INTEGER,
+    final_score         REAL,
+    computed_at         TEXT
+);
 """
+
+# candidatesテーブルへの追加カラム（このプロジェクト初のスキーマ変更）。
+# CREATE TABLE IF NOT EXISTS では既存テーブルに新カラムは追加されないため、
+# init_db()側でPRAGMA table_infoを見て無ければALTER TABLEする。
+_CANDIDATES_MIGRATIONS = [
+    ("prediction_status", "ALTER TABLE candidates ADD COLUMN prediction_status TEXT"),
+]
 
 
 @dataclass(frozen=True)
@@ -82,10 +100,18 @@ class RankedCandidate:
     rank: int
     status: str
     drafts: list[str]
+    prediction_status: str | None = None
 
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(candidates)").fetchall()}
+    for column_name, alter_sql in _CANDIDATES_MIGRATIONS:
+        if column_name not in existing_cols:
+            try:
+                conn.execute(alter_sql)
+            except sqlite3.OperationalError:
+                pass  # 並行接続で他プロセスが既に追加済みの場合がある
     conn.commit()
 
 
@@ -184,38 +210,121 @@ def save_drafts(conn: sqlite3.Connection, candidate_id: str, texts: list[str]) -
     conn.commit()
 
 
+_RANKED_SELECT = """
+    SELECT id, text, author_id, author_screen_name, author_followers,
+           created_at, likes, retweets, replies, quotes, keyword,
+           score, rank, status, prediction_status
+    FROM candidates
+    WHERE rank IS NOT NULL
+"""
+
+
+def _row_to_ranked(conn: sqlite3.Connection, r) -> RankedCandidate:
+    candidate = Candidate(
+        id=r[0], text=r[1], author_id=r[2], author_screen_name=r[3],
+        author_followers=r[4], created_at=r[5], likes=r[6], retweets=r[7],
+        replies=r[8], quotes=r[9], keyword=r[10],
+    )
+    drafts = [
+        row[0]
+        for row in conn.execute(
+            "SELECT draft_text FROM drafts WHERE candidate_id=? ORDER BY variant",
+            (candidate.id,),
+        ).fetchall()
+    ]
+    return RankedCandidate(
+        candidate=candidate, score=r[11] or 0.0, rank=r[12],
+        status=r[13], drafts=drafts, prediction_status=r[14],
+    )
+
+
 def get_top_candidates(conn: sqlite3.Connection) -> list[RankedCandidate]:
+    rows = conn.execute(_RANKED_SELECT + " ORDER BY rank ASC").fetchall()
+    return [_row_to_ranked(conn, r) for r in rows]
+
+
+def get_draftable_candidates(conn: sqlite3.Connection, limit: int) -> list[RankedCandidate]:
+    """下書き生成の対象候補のみ返す（見送り・送信済みは除外、rank<=limitのみ）。"""
+    rows = conn.execute(
+        _RANKED_SELECT + " AND status = '未送信' AND rank <= ? ORDER BY rank ASC",
+        (limit,),
+    ).fetchall()
+    return [_row_to_ranked(conn, r) for r in rows]
+
+
+# prediction_statusに保存する表示文言。「一致が無かった」のか「一致はしたが
+# 時制ミスマッチ等の理由で見送った」のかを区別できるようにする。
+PREDICTION_STATUS_NO_MATCH = "予測データ未投入"
+PREDICTION_STATUS_TIME_MISMATCH = "時制スキップ"
+
+
+def set_prediction_status(conn: sqlite3.Connection, candidate_id: str, status: str) -> None:
+    conn.execute("UPDATE candidates SET prediction_status=? WHERE id=?", (status, candidate_id))
+    conn.commit()
+
+
+def mark_prediction_unavailable(conn: sqlite3.Connection, candidate_id: str) -> None:
+    set_prediction_status(conn, candidate_id, PREDICTION_STATUS_NO_MATCH)
+
+
+def clear_prediction_status(conn: sqlite3.Connection, candidate_id: str) -> None:
+    conn.execute("UPDATE candidates SET prediction_status=NULL WHERE id=?", (candidate_id,))
+    conn.commit()
+
+
+def save_score_factors(
+    conn: sqlite3.Connection,
+    candidate_id: str,
+    velocity_norm: float,
+    follower_norm: float,
+    specificity: float,
+    trusted: float,
+    analytical: float,
+    ng_penalty_applied: bool,
+    final_score: float,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO score_factors
+          (candidate_id, velocity_norm, follower_norm, specificity, trusted,
+           analytical, ng_penalty_applied, final_score, computed_at)
+        VALUES (?,?,?,?,?,?,?,?, datetime('now'))
+        ON CONFLICT(candidate_id) DO UPDATE SET
+          velocity_norm=excluded.velocity_norm, follower_norm=excluded.follower_norm,
+          specificity=excluded.specificity, trusted=excluded.trusted,
+          analytical=excluded.analytical, ng_penalty_applied=excluded.ng_penalty_applied,
+          final_score=excluded.final_score, computed_at=excluded.computed_at
+        """,
+        (
+            candidate_id, velocity_norm, follower_norm, specificity, trusted,
+            analytical, int(ng_penalty_applied), final_score,
+        ),
+    )
+    conn.commit()
+
+
+def get_score_review_rows(conn: sqlite3.Connection) -> list[dict]:
+    """score_factors + sent_replies + candidates をJOINしたスコア妥当性検証用の行。"""
     rows = conn.execute(
         """
-        SELECT id, text, author_id, author_screen_name, author_followers,
-               created_at, likes, retweets, replies, quotes, keyword,
-               score, rank, status
-        FROM candidates
-        WHERE rank IS NOT NULL
-        ORDER BY rank ASC
+        SELECT c.id, c.author_screen_name, c.text,
+               sf.velocity_norm, sf.follower_norm, sf.specificity, sf.trusted,
+               sf.analytical, sf.ng_penalty_applied, sf.final_score,
+               sr.sent_at, sr.impressions, sr.likes, sr.retweets, sr.replies
+        FROM candidates c
+        LEFT JOIN score_factors sf ON sf.candidate_id = c.id
+        LEFT JOIN sent_replies sr ON sr.candidate_id = c.id
+        WHERE sf.candidate_id IS NOT NULL
+        ORDER BY sf.final_score DESC
         """
     ).fetchall()
-    result: list[RankedCandidate] = []
-    for r in rows:
-        candidate = Candidate(
-            id=r[0], text=r[1], author_id=r[2], author_screen_name=r[3],
-            author_followers=r[4], created_at=r[5], likes=r[6], retweets=r[7],
-            replies=r[8], quotes=r[9], keyword=r[10],
-        )
-        drafts = [
-            row[0]
-            for row in conn.execute(
-                "SELECT draft_text FROM drafts WHERE candidate_id=? ORDER BY variant",
-                (candidate.id,),
-            ).fetchall()
-        ]
-        result.append(
-            RankedCandidate(
-                candidate=candidate, score=r[11] or 0.0, rank=r[12],
-                status=r[13], drafts=drafts,
-            )
-        )
-    return result
+    columns = [
+        "candidate_id", "author_screen_name", "text",
+        "velocity_norm", "follower_norm", "specificity", "trusted",
+        "analytical", "ng_penalty_applied", "final_score",
+        "sent_at", "impressions", "likes", "retweets", "replies",
+    ]
+    return [dict(zip(columns, r)) for r in rows]
 
 
 def update_status(

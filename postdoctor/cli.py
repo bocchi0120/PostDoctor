@@ -7,11 +7,12 @@
   python main.py run       --account rakuba_ai [--all]   # fetch -> analyze(全指標) -> prescribe
   python main.py serve     --account rakuba_ai [--port 8765]  # ダッシュボードをブラウザで配信、更新ボタン付き
 
-  python main.py reply-scout scout  --account rakuba_ai                     # 候補収集+スコアリング
-  python main.py reply-scout draft  --account rakuba_ai [--predictions ...] # リプライ下書き生成
-  python main.py reply-scout run    --account rakuba_ai [--predictions ...] # scout -> draft
-  python main.py reply-scout track  --account rakuba_ai                     # 送信済みリプライの反応追跡
-  python main.py reply-scout status --account rakuba_ai --id <tweet_id> --status 送信済み|見送り [--reply-id ...]
+  python main.py reply-scout scout     --account rakuba_ai   # 候補収集+スコアリング
+  python main.py reply-scout draft     --account rakuba_ai   # リプライ下書き生成（config/keywords.jsonのrakuba_output_dirを参照）
+  python main.py reply-scout run       --account rakuba_ai   # scout -> draft
+  python main.py reply-scout track     --account rakuba_ai   # 送信済みリプライの反応追跡
+  python main.py reply-scout status    --account rakuba_ai --id <tweet_id> --status 送信済み|見送り [--reply-id ...]
+  python main.py reply-scout scorecard --account rakuba_ai   # スコア内訳と実際の反応をCSVに書き出す
 """
 
 from __future__ import annotations
@@ -93,13 +94,13 @@ def cmd_reply_scout_scout(account: Account) -> None:
         print(f"[{account.name}] reply-scout: {line}")
 
 
-def cmd_reply_scout_draft(account: Account, predictions_path: str | None) -> None:
-    for line in rs_orchestrator.run_draft(account, predictions_path):
+def cmd_reply_scout_draft(account: Account) -> None:
+    for line in rs_orchestrator.run_draft(account):
         print(f"[{account.name}] reply-scout: {line}")
 
 
-def cmd_reply_scout_run(account: Account, predictions_path: str | None) -> None:
-    for line in rs_orchestrator.run_scout_and_draft(account, predictions_path):
+def cmd_reply_scout_run(account: Account) -> None:
+    for line in rs_orchestrator.run_scout_and_draft(account):
         print(f"[{account.name}] reply-scout: {line}")
 
 
@@ -112,6 +113,11 @@ def cmd_reply_scout_status(account: Account, tweet_id: str, status: str, reply_i
     with rs_db.connect(account) as conn:
         rs_db.update_status(conn, tweet_id, status, reply_id)
     print(f"[{account.name}] reply-scout: 候補 {tweet_id} のステータスを '{status}' に更新しました。")
+
+
+def cmd_reply_scout_scorecard(account: Account) -> None:
+    out = rs_orchestrator.export_score_review(account)
+    print(f"[{account.name}] reply-scout: スコア妥当性検証用CSVを書き出しました: {out}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -136,13 +142,11 @@ def build_parser() -> argparse.ArgumentParser:
     scout_p = rs_sub.add_parser("scout", help="候補投稿を収集・スコアリングしてTOP10を選定する")
     scout_p.add_argument("--account", required=True)
 
-    draft_p = rs_sub.add_parser("draft", help="TOP10候補にリプライ下書きを2案生成する")
+    draft_p = rs_sub.add_parser("draft", help="上位候補にリプライ下書きを2案生成する（見送り/送信済みは対象外、件数はconfig/keywords.jsonのdraft_top_n）")
     draft_p.add_argument("--account", required=True)
-    draft_p.add_argument("--predictions", default=None, help="Rakuba予測データのJSONパス（省略時は data/<account>/predictions.json）")
 
     run_p = rs_sub.add_parser("run", help="scout -> draft をまとめて実行する")
     run_p.add_argument("--account", required=True)
-    run_p.add_argument("--predictions", default=None)
 
     track_p = rs_sub.add_parser("track", help="送信済みリプライの反応（いいね等）を追跡する")
     track_p.add_argument("--account", required=True)
@@ -152,6 +156,9 @@ def build_parser() -> argparse.ArgumentParser:
     status_p.add_argument("--id", dest="tweet_id", required=True, help="対象の投稿ID")
     status_p.add_argument("--status", required=True, choices=["未送信", "送信済み", "見送り"])
     status_p.add_argument("--reply-id", default=None, help="送信済みにする場合、追跡用の自分のリプライID")
+
+    scorecard_p = rs_sub.add_parser("scorecard", help="スコア内訳と実際の反応(いいね等)をCSVに書き出す")
+    scorecard_p.add_argument("--account", required=True)
 
     return parser
 
@@ -172,13 +179,15 @@ def main(argv: list[str] | None = None) -> None:
         if args.rs_action == "scout":
             cmd_reply_scout_scout(account)
         elif args.rs_action == "draft":
-            cmd_reply_scout_draft(account, args.predictions)
+            cmd_reply_scout_draft(account)
         elif args.rs_action == "run":
-            cmd_reply_scout_run(account, args.predictions)
+            cmd_reply_scout_run(account)
         elif args.rs_action == "track":
             cmd_reply_scout_track(account)
         elif args.rs_action == "status":
             cmd_reply_scout_status(account, args.tweet_id, args.status, args.reply_id)
+        elif args.rs_action == "scorecard":
+            cmd_reply_scout_scorecard(account)
         return
 
     accounts = _resolve_accounts(args)
