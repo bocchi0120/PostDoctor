@@ -136,6 +136,12 @@ python main.py reply-scout status --account rakuba_ai --id <tweet_id> --status �
   - 各候補の **送信済みにする** / **見送り** ボタンでステータスを記録
     （送信済みにする際、リプライのURL/IDを入力すると反応追跡の対象になる）
   - 上記CLIコマンドも引き続き使用可能（`--predictions` でファイルを差し替えたい場合など）
+- **`prediction_data.py`・`prescriber.py`の下書き生成ロジックを変更したら、既存の下書きを
+  再生成すること。** `reply-scout draft`は`drafts`に既にレコードがある候補をスキップする
+  （`prescriber.draft_top_candidates()`の`if ranked.drafts: continue`）ため、ロジック変更後に
+  そのまま`draft`を実行しても古い（誤った）下書きが残り続ける。DBの`drafts`テーブルを
+  `DELETE FROM drafts;`で全クリアしてから`reply-scout draft`を再実行すること
+  （関屋記念の未来レースに「(結果除外)」が誤って残留した実例あり）。
 
 ### コスト目安
 

@@ -37,8 +37,13 @@ def test_confirmed_race_keys(pcfg):
     results = pd.load_race_results(pcfg)
     confirmed = pd.confirmed_race_keys(results)
     assert "TESTRACE0001" in confirmed  # chakujun>0の行がある
-    assert "TESTRACE0003" in confirmed  # chakujun=0(全除外)でもレース自体は確定済み
     assert "TESTRACE0002" not in confirmed  # 結果行が無い（未確定）
+    # TESTRACE0003は行はあるがchakujun>0が1件も無い（全頭除外）。行の存在だけでは
+    # 確定と判定しない（詳細はconfirmed_race_keys()のdocstring参照）。
+    assert "TESTRACE0003" not in confirmed
+    # TESTRACE0004: 枠順未確定(uma_num=0)のプレースホルダ行のみでchakujun>0が無い。
+    # 関屋記念で実際に発生したバグ（未来のレースが確定済み扱いされた）の回帰テスト。
+    assert "TESTRACE0004" not in confirmed
 
 
 def _match(pcfg, text):
@@ -88,9 +93,12 @@ def test_find_match_short_name_with_context_is_accepted(pcfg):
     assert m is not None
     assert reason is None
     assert m.horse.uma_code == "H0004"
-    assert m.concluded is True
-    assert m.chakujun == 0
-    assert "除外" in m.fact_sentence
+    # TESTRACE0003はchakujun>0の行が無い(全頭除外)ため未確定扱いになる
+    # （個別馬の除外表示自体は test_find_match_individual_exclusion_within_confirmed_race
+    # で別途検証する）。
+    assert m.concluded is False
+    assert m.chakujun is None
+    assert "除外" not in m.fact_sentence
 
 
 def test_find_match_unconfirmed_race_omits_result_clause(pcfg):
@@ -99,6 +107,31 @@ def test_find_match_unconfirmed_race_omits_result_clause(pcfg):
     assert reason is None
     assert m.concluded is False
     assert m.chakujun is None
+    assert "結果" not in m.fact_sentence
+
+
+def test_find_match_individual_exclusion_within_confirmed_race(pcfg):
+    """レース自体はchakujun>0の行があり確定済みだが、対象馬個体は出走除外(chakujun=0)
+    だったケース。レースが確定している以上、除外の事実は正しく表示されるべき
+    （全頭除外で未確定扱いになるTESTRACE0003とは区別する）。"""
+    m, reason = _match(pcfg, "テストホースロクに期待していたのに")
+    assert m is not None
+    assert reason is None
+    assert m.concluded is True
+    assert m.chakujun == 0
+    assert "除外" in m.fact_sentence
+
+
+def test_find_match_future_race_with_placeholder_row_omits_result_clause(pcfg):
+    """関屋記念で実際に発生したバグの回帰テスト: 枠順未確定(uma_num=0)の
+    プレースホルダ行がrace_results.csvに先行して書き込まれていても、
+    chakujun>0の行が無い限り「レース未確定」とみなし、結果節を一切付けない。"""
+    m, reason = _match(pcfg, "テストホースゴに期待しています")
+    assert m is not None
+    assert reason is None
+    assert m.concluded is False
+    assert m.chakujun is None
+    assert "除外" not in m.fact_sentence
     assert "結果" not in m.fact_sentence
 
 

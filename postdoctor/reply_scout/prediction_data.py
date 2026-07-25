@@ -148,14 +148,22 @@ def load_race_results(pcfg: PredictionConfig) -> dict[str, dict[str, dict]]:
 
 
 def confirmed_race_keys(results: dict[str, dict[str, dict]]) -> set[str]:
-    """race_results.csvに結果行が存在するrace_keyの集合（レース自体が確定済みか）。
+    """race_results.csvで、chakujun>0の行が1件以上あるrace_keyの集合（レース自体が確定済みか）。
 
-    出走馬が全員除外(chakujun=0)であっても、レース自体は「開催され、結果が
-    確定した」ことに変わりはない（＝未来のレースとは区別すべき）ため、
-    chakujun>0の有無ではなく行の存在自体で判定する。個々の馬が実際に
+    以前は行の存在自体で確定済みと判定していたが、枠順未確定(uma_num=0)の
+    プレースホルダ行がレース確定前にrace_results.csvへ先行して書き込まれる
+    ケースがあり、未来のレース（例: 関屋記念）への返信下書きに誤って
+    「(結果除外)」が付く実害が発生した。行の存在ではなく、chakujun>0の行が
+    実際に1件以上あることをもって「レースが行われ結果が出た」とみなす
+    （全頭が本当に出走除外だった極めて稀なケースでは結果節を付けなくなるが、
+    誤って未来のレースに結果を捏造するよりは安全側）。個々の馬が実際に
     完走したか除外だったかは find_match() 側で chakujun の値を見て判断する。
     """
-    return set(results.keys())
+    return {
+        race_key
+        for race_key, horses in results.items()
+        if any(info["chakujun"] > 0 for info in horses.values())
+    }
 
 
 def mark_for_score(score: float) -> str:
