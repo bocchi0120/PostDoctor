@@ -11,8 +11,12 @@ from __future__ import annotations
 
 import os
 
+from datetime import datetime, timedelta, timezone
+
 from postdoctor.config import Account
 from postdoctor.reply_scout import analyzer, db, fetcher, prediction_data, prescriber
+
+REPLY_TRACKING_WINDOW_DAYS = 14
 
 
 def run_scout(account: Account) -> list[str]:
@@ -68,6 +72,8 @@ def run_scout_and_draft(account: Account) -> list[str]:
 
 
 def run_track(account: Account) -> list[str]:
+    cfg = fetcher.load_config()
+    log: list[str] = []
     with db.connect(account) as conn:
         reply_ids = db.get_sent_replies(conn)
         if not reply_ids:
@@ -77,8 +83,39 @@ def run_track(account: Account) -> list[str]:
             db.update_sent_reply_metrics(
                 conn, reply_id, m["impressions"], m["likes"], m["retweets"], m["replies"]
             )
-    cost = len(metrics) * 0.001
-    return [f"{len(metrics)}件の送信済みリプライを更新しました（概算${cost:.3f}）。"]
+        cost = len(metrics) * 0.001
+        log.append(f"{len(metrics)}件の送信済みリプライを更新しました（概算${cost:.3f}）。")
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=REPLY_TRACKING_WINDOW_DAYS)).isoformat(
+            timespec="seconds"
+        )
+        targets = db.get_trackable_sent_replies(conn, cutoff)
+        if not targets:
+            log.append("返信検知: 直近14日以内の送信済みリプライがないため対象外です。")
+        else:
+            # 返信検知の検索読み取りはscoutの候補収集(tweet_read)と同じ
+            # daily_read_limit予算を共有する（同じ有料エンドポイントのため）。
+            already_read_today = db.get_today_usage(conn, "tweet_read")
+            remaining = max(cfg.daily_read_limit - already_read_today, 0)
+            if remaining <= 0:
+                log.append(
+                    f"返信検知: 本日の検索読み取り上限（{cfg.daily_read_limit}件）に"
+                    "達しているためスキップしました。"
+                )
+            else:
+                responses, read_count = fetcher.fetch_reply_responses(
+                    account, targets, max_read=remaining
+                )
+                inserted = db.save_reply_responses(conn, responses) if responses else 0
+                if read_count:
+                    db.add_usage(conn, "tweet_read", read_count)
+                search_cost = read_count * fetcher.TWEET_READ_COST
+                log.append(
+                    f"返信検知: 新規{inserted}件の返信を検出しました"
+                    f"（対象{len(targets)}件・読み取り{read_count}件・概算${search_cost:.3f}）。"
+                )
+
+    return log
 
 
 def export_score_review(account: Account) -> str:

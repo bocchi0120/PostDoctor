@@ -10,10 +10,22 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Iterator
 
 from postdoctor.config import Account
+
+
+def _utc_now_iso() -> str:
+    """記帳系タイムスタンプ(fetched_at/generated_at/computed_at/sent_at/last_checked_at)の
+    共通フォーマット。SQLiteの datetime('now') もUTCを返すが、オフセット無しの
+    'YYYY-MM-DD HH:MM:SS' はUTC/JSTの見分けがつかず表示側での誤変換を招いたため
+    （実例: sent_atをJSTと誤認して表示し、実際の送信時刻と9時間ズレて見えたバグ）、
+    以後はオフセット明示のISO8601で統一する。表示側（dashboard）でJSTへ変換すること。
+    投稿日時そのもの(candidates.created_at等)はfetcher層で別途JST変換済みの値を使うため
+    この関数の対象ではない。
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS candidates (
@@ -34,11 +46,12 @@ CREATE TABLE IF NOT EXISTS candidates (
     fetched_at          TEXT
 );
 CREATE TABLE IF NOT EXISTS drafts (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    candidate_id  TEXT NOT NULL,
-    variant       INTEGER NOT NULL,
-    draft_text    TEXT NOT NULL,
-    generated_at  TEXT,
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id      TEXT NOT NULL,
+    variant           INTEGER NOT NULL,
+    draft_text        TEXT NOT NULL,
+    generated_at      TEXT,
+    predictions_hash  TEXT,
     UNIQUE(candidate_id, variant)
 );
 CREATE TABLE IF NOT EXISTS sent_replies (
@@ -68,6 +81,16 @@ CREATE TABLE IF NOT EXISTS score_factors (
     final_score         REAL,
     computed_at         TEXT
 );
+CREATE TABLE IF NOT EXISTS reply_responses (
+    id                TEXT PRIMARY KEY,   -- 返信ツイートID
+    parent_reply_id   TEXT NOT NULL,      -- どの送信済みリプライ(sent_replies.reply_id)への返信か
+    author_id         TEXT NOT NULL,
+    author_username   TEXT,
+    text              TEXT NOT NULL,
+    created_at        TEXT NOT NULL,      -- ISO8601 (JST)
+    acknowledged      INTEGER DEFAULT 0,
+    fetched_at        TEXT
+);
 """
 
 # candidatesテーブルへの追加カラム（このプロジェクト初のスキーマ変更）。
@@ -75,6 +98,13 @@ CREATE TABLE IF NOT EXISTS score_factors (
 # init_db()側でPRAGMA table_infoを見て無ければALTER TABLEする。
 _CANDIDATES_MIGRATIONS = [
     ("prediction_status", "ALTER TABLE candidates ADD COLUMN prediction_status TEXT"),
+]
+
+# draftsテーブルへの追加カラム。predictions_hashは下書き生成時点のRakuba予測データの
+# 指紋（prediction_data.compute_predictions_signature()）。表示・送信済み操作時に
+# 現在の指紋と突き合わせて「予測更新あり」警告を出すために使う。
+_DRAFTS_MIGRATIONS = [
+    ("predictions_hash", "ALTER TABLE drafts ADD COLUMN predictions_hash TEXT"),
 ]
 
 
@@ -101,6 +131,7 @@ class RankedCandidate:
     status: str
     drafts: list[str]
     prediction_status: str | None = None
+    predictions_hash: str | None = None
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -108,6 +139,13 @@ def init_db(conn: sqlite3.Connection) -> None:
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(candidates)").fetchall()}
     for column_name, alter_sql in _CANDIDATES_MIGRATIONS:
         if column_name not in existing_cols:
+            try:
+                conn.execute(alter_sql)
+            except sqlite3.OperationalError:
+                pass  # 並行接続で他プロセスが既に追加済みの場合がある
+    existing_draft_cols = {row[1] for row in conn.execute("PRAGMA table_info(drafts)").fetchall()}
+    for column_name, alter_sql in _DRAFTS_MIGRATIONS:
+        if column_name not in existing_draft_cols:
             try:
                 conn.execute(alter_sql)
             except sqlite3.OperationalError:
@@ -143,12 +181,13 @@ def insert_candidates(conn: sqlite3.Connection, candidates: list[Candidate]) -> 
             INSERT INTO candidates
               (id, text, author_id, author_screen_name, author_followers,
                created_at, likes, retweets, replies, quotes, keyword, fetched_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?, datetime('now'))
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO NOTHING
             """,
             (
                 c.id, c.text, c.author_id, c.author_screen_name, c.author_followers,
                 c.created_at, c.likes, c.retweets, c.replies, c.quotes, c.keyword,
+                _utc_now_iso(),
             ),
         )
         count += cur.rowcount
@@ -196,16 +235,29 @@ def set_ranking(conn: sqlite3.Connection, ranked: list[tuple[str, float, int]]) 
     conn.commit()
 
 
-def save_drafts(conn: sqlite3.Connection, candidate_id: str, texts: list[str]) -> None:
+def save_drafts(
+    conn: sqlite3.Connection,
+    candidate_id: str,
+    texts: list[str],
+    predictions_hash: str | None = None,
+) -> None:
+    """predictions_hashは生成時点のRakuba予測データの指紋（省略時はNone=比較不能）。
+
+    prediction_data.compute_predictions_signature()の値をそのまま渡す想定。
+    表示・送信済み操作時に現在の指紋と突き合わせ、ずれていれば「予測更新あり」
+    警告をダッシュボードに出す。
+    """
+    generated_at = _utc_now_iso()
     for variant, text in enumerate(texts, start=1):
         conn.execute(
             """
-            INSERT INTO drafts (candidate_id, variant, draft_text, generated_at)
-            VALUES (?, ?, ?, datetime('now'))
+            INSERT INTO drafts (candidate_id, variant, draft_text, generated_at, predictions_hash)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(candidate_id, variant) DO UPDATE SET
-              draft_text=excluded.draft_text, generated_at=excluded.generated_at
+              draft_text=excluded.draft_text, generated_at=excluded.generated_at,
+              predictions_hash=excluded.predictions_hash
             """,
-            (candidate_id, variant, text),
+            (candidate_id, variant, text, generated_at, predictions_hash),
         )
     conn.commit()
 
@@ -225,16 +277,17 @@ def _row_to_ranked(conn: sqlite3.Connection, r) -> RankedCandidate:
         author_followers=r[4], created_at=r[5], likes=r[6], retweets=r[7],
         replies=r[8], quotes=r[9], keyword=r[10],
     )
-    drafts = [
-        row[0]
-        for row in conn.execute(
-            "SELECT draft_text FROM drafts WHERE candidate_id=? ORDER BY variant",
-            (candidate.id,),
-        ).fetchall()
-    ]
+    draft_rows = conn.execute(
+        "SELECT draft_text, predictions_hash FROM drafts WHERE candidate_id=? ORDER BY variant",
+        (candidate.id,),
+    ).fetchall()
+    drafts = [row[0] for row in draft_rows]
+    # 全variantで同じ指紋を保存しているので先頭の値を代表として使う
+    predictions_hash = draft_rows[0][1] if draft_rows else None
     return RankedCandidate(
         candidate=candidate, score=r[11] or 0.0, rank=r[12],
         status=r[13], drafts=drafts, prediction_status=r[14],
+        predictions_hash=predictions_hash,
     )
 
 
@@ -288,7 +341,7 @@ def save_score_factors(
         INSERT INTO score_factors
           (candidate_id, velocity_norm, follower_norm, specificity, trusted,
            analytical, ng_penalty_applied, final_score, computed_at)
-        VALUES (?,?,?,?,?,?,?,?, datetime('now'))
+        VALUES (?,?,?,?,?,?,?,?,?)
         ON CONFLICT(candidate_id) DO UPDATE SET
           velocity_norm=excluded.velocity_norm, follower_norm=excluded.follower_norm,
           specificity=excluded.specificity, trusted=excluded.trusted,
@@ -297,7 +350,7 @@ def save_score_factors(
         """,
         (
             candidate_id, velocity_norm, follower_norm, specificity, trusted,
-            analytical, int(ng_penalty_applied), final_score,
+            analytical, int(ng_penalty_applied), final_score, _utc_now_iso(),
         ),
     )
     conn.commit()
@@ -335,10 +388,10 @@ def update_status(
         conn.execute(
             """
             INSERT INTO sent_replies (reply_id, candidate_id, sent_at)
-            VALUES (?, ?, datetime('now'))
+            VALUES (?, ?, ?)
             ON CONFLICT(reply_id) DO NOTHING
             """,
-            (reply_id, candidate_id),
+            (reply_id, candidate_id, _utc_now_iso()),
         )
     conn.commit()
 
@@ -357,18 +410,25 @@ class SentReply:
     likes: int
     retweets: int
     replies: int
+    other_reply_count: int
     last_checked_at: str | None
     author_screen_name: str | None
     original_text: str | None
 
 
 def get_sent_reply_details(conn: sqlite3.Connection) -> list[SentReply]:
-    """送信済みリプライを、追跡した反応値と元候補の情報つきで新しい順に返す。"""
+    """送信済みリプライを、追跡した反応値と元候補の情報つきで新しい順に返す。
+
+    other_reply_count は reply_responses(他者からの返信のみを保存)からの集計であり、
+    sr.replies(X APIのpublic_metrics.reply_count、自分自身のぶら下げ返信も含む生の値)
+    とは別物。「相手からの反応」の指標としてはother_reply_countの方を使うこと。
+    """
     rows = conn.execute(
         """
         SELECT sr.reply_id, sr.candidate_id, sr.sent_at, sr.impressions, sr.likes,
                sr.retweets, sr.replies, sr.last_checked_at,
-               c.author_screen_name, c.text
+               c.author_screen_name, c.text,
+               (SELECT COUNT(*) FROM reply_responses rr WHERE rr.parent_reply_id = sr.reply_id)
         FROM sent_replies sr
         LEFT JOIN candidates c ON c.id = sr.candidate_id
         ORDER BY sr.sent_at DESC
@@ -379,9 +439,97 @@ def get_sent_reply_details(conn: sqlite3.Connection) -> list[SentReply]:
             reply_id=r[0], candidate_id=r[1], sent_at=r[2],
             impressions=r[3] or 0, likes=r[4] or 0, retweets=r[5] or 0, replies=r[6] or 0,
             last_checked_at=r[7], author_screen_name=r[8], original_text=r[9],
+            other_reply_count=r[10] or 0,
         )
         for r in rows
     ]
+
+
+@dataclass(frozen=True)
+class TrackTarget:
+    """反応追跡(返信検知)の対象となる送信済みリプライ1件。"""
+    reply_id: str
+    candidate_id: str  # 元投稿のID。候補はscoutで"-is:reply"のみ収集しているためconversation_idと一致する
+    sent_at: str
+
+
+def get_trackable_sent_replies(conn: sqlite3.Connection, cutoff_iso: str) -> list[TrackTarget]:
+    """返信検知の対象とする送信済みリプライ（sent_atがcutoff_iso以降のもの）を返す。
+
+    古いリプライまで追い続けると検索コストが際限なく増えるため、
+    運用上「送信から14日以内」に限定する（呼び出し側がcutoff_isoを計算する）。
+    """
+    rows = conn.execute(
+        "SELECT reply_id, candidate_id, sent_at FROM sent_replies WHERE sent_at >= ?",
+        (cutoff_iso,),
+    ).fetchall()
+    return [TrackTarget(reply_id=r[0], candidate_id=r[1], sent_at=r[2]) for r in rows]
+
+
+@dataclass(frozen=True)
+class ReplyResponse:
+    id: str
+    parent_reply_id: str
+    author_id: str
+    author_username: str | None
+    text: str
+    created_at: str  # ISO8601 (JST)
+
+
+def save_reply_responses(conn: sqlite3.Connection, responses: list[ReplyResponse]) -> int:
+    """他者からの返信のみを保存する想定（自分自身の返信は呼び出し側で除外済み）。"""
+    count = 0
+    for r in responses:
+        cur = conn.execute(
+            """
+            INSERT INTO reply_responses
+              (id, parent_reply_id, author_id, author_username, text, created_at, fetched_at)
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO NOTHING
+            """,
+            (r.id, r.parent_reply_id, r.author_id, r.author_username, r.text, r.created_at, _utc_now_iso()),
+        )
+        count += cur.rowcount
+    conn.commit()
+    return count
+
+
+@dataclass(frozen=True)
+class ReplyResponseDetail:
+    response: ReplyResponse
+    acknowledged: bool
+    original_author_screen_name: str | None  # 元投稿(候補)の投稿者。文脈表示用
+
+
+def get_unacknowledged_responses(conn: sqlite3.Connection) -> list[ReplyResponseDetail]:
+    """未対応(acknowledged=0)の返信を新しい順に返す。"""
+    rows = conn.execute(
+        """
+        SELECT rr.id, rr.parent_reply_id, rr.author_id, rr.author_username, rr.text,
+               rr.created_at, rr.acknowledged, c.author_screen_name
+        FROM reply_responses rr
+        LEFT JOIN sent_replies sr ON sr.reply_id = rr.parent_reply_id
+        LEFT JOIN candidates c ON c.id = sr.candidate_id
+        WHERE rr.acknowledged = 0
+        ORDER BY rr.created_at DESC
+        """
+    ).fetchall()
+    return [
+        ReplyResponseDetail(
+            response=ReplyResponse(
+                id=r[0], parent_reply_id=r[1], author_id=r[2], author_username=r[3],
+                text=r[4], created_at=r[5],
+            ),
+            acknowledged=bool(r[6]),
+            original_author_screen_name=r[7],
+        )
+        for r in rows
+    ]
+
+
+def acknowledge_response(conn: sqlite3.Connection, response_id: str) -> None:
+    conn.execute("UPDATE reply_responses SET acknowledged=1 WHERE id=?", (response_id,))
+    conn.commit()
 
 
 def update_sent_reply_metrics(
@@ -390,10 +538,10 @@ def update_sent_reply_metrics(
     conn.execute(
         """
         UPDATE sent_replies
-        SET impressions=?, likes=?, retweets=?, replies=?, last_checked_at=datetime('now')
+        SET impressions=?, likes=?, retweets=?, replies=?, last_checked_at=?
         WHERE reply_id=?
         """,
-        (impressions, likes, retweets, replies, reply_id),
+        (impressions, likes, retweets, replies, _utc_now_iso(), reply_id),
     )
     conn.commit()
 

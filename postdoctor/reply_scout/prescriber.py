@@ -156,6 +156,7 @@ def draft_top_candidates(account: Account, conn, cfg: ScoutConfig) -> int:
     predictions = prediction_data.load_all_predictions(pcfg)
     results = prediction_data.load_race_results(pcfg)
     confirmed = prediction_data.confirmed_race_keys(results)
+    predictions_hash = prediction_data.compute_predictions_signature(pcfg)
 
     count = 0
     for ranked in db.get_draftable_candidates(conn, cfg.draft_top_n):
@@ -174,6 +175,6 @@ def draft_top_candidates(account: Account, conn, cfg: ScoutConfig) -> int:
             continue
         db.clear_prediction_status(conn, ranked.candidate.id)
         drafts = generate_drafts(ranked.candidate, match, model=cfg.claude_model)
-        db.save_drafts(conn, ranked.candidate.id, drafts)
+        db.save_drafts(conn, ranked.candidate.id, drafts, predictions_hash=predictions_hash)
         count += 1
     return count

@@ -119,6 +119,22 @@ def _make_handler(account: Account) -> type[BaseHTTPRequestHandler]:
                     self._write_json(500, {"ok": False, "error": str(e)})
                 return
 
+            if self.path == "/api/reply_scout/ack":
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(length) or b"{}")
+                    response_id = str(body.get("response_id", "")).strip()
+                    if not response_id:
+                        self._write_json(400, {"ok": False, "error": "response_id が不正です。"})
+                        return
+                    with rs_db.connect(account) as conn:
+                        rs_db.acknowledge_response(conn, response_id)
+                    _regenerate_dashboard(account)
+                    self._write_json(200, {"ok": True})
+                except Exception as e:
+                    self._write_json(500, {"ok": False, "error": str(e)})
+                return
+
             if self.path == "/api/reply_scout/status":
                 try:
                     length = int(self.headers.get("Content-Length", 0))

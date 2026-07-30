@@ -30,7 +30,7 @@ def _candidate(cid: str, text: str) -> Candidate:
 
 def _cfg() -> ScoutConfig:
     return ScoutConfig(
-        keywords=["競馬"], specific_terms=[], ng_words=[], analysis_terms=[],
+        keywords=["競馬"], specific_terms=[], ng_words=[], solicitation_words=[], analysis_terms=[],
         trusted_authors=[], daily_read_limit=50, min_likes=5, min_replies=0,
         top_user_lookup_limit=15, claude_model="claude-sonnet-5",
         draft_top_n=5, rakuba_output_dir=str(FIXTURES_DIR),
@@ -159,6 +159,29 @@ def test_draft_top_candidates_distinguishes_time_mismatch_status(monkeypatch, co
     ranked_by_id = {r.candidate.id: r for r in db.get_top_candidates(conn)}
     assert ranked_by_id["nomatch1"].prediction_status == db.PREDICTION_STATUS_NO_MATCH
     assert ranked_by_id["timeskip1"].prediction_status == db.PREDICTION_STATUS_TIME_MISMATCH
+
+
+def test_draft_top_candidates_saves_current_predictions_hash(monkeypatch, conn):
+    cfg = _cfg()
+    db.insert_candidates(conn, [_candidate("match1", "テストホースイチが強かった")])
+    db.set_ranking(conn, [("match1", 0.9, 1)])
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            return _FakeResponse('{"reactions": ["いい馬ですね", "注目しています"]}')
+
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr(prescriber, "_client", lambda: _FakeClient())
+    prescriber.draft_top_candidates(account=None, conn=conn, cfg=cfg)
+
+    expected_hash = prediction_data.compute_predictions_signature(
+        prediction_data.load_prediction_config(str(FIXTURES_DIR))
+    )
+    ranked = db.get_top_candidates(conn)[0]
+    assert ranked.predictions_hash == expected_hash
+    assert ranked.predictions_hash is not None
 
 
 def test_draft_top_candidates_excludes_skipped_status(monkeypatch, conn):

@@ -46,6 +46,17 @@ def _is_ng(candidate: Candidate, ng_words: list[str]) -> bool:
     return _contains_any(candidate.text, ng_words)
 
 
+def _is_solicitation(candidate: Candidate, solicitation_words: list[str]) -> bool:
+    """有料級・限定情報の売り込みなど、そもそもリプライ対象にすべきでない投稿の判定。
+
+    ng_words（煽り系、スコア半減のみ）とは別の、ハード除外用の語彙リスト
+    （config/ng_words.jsonのsolicitation_words）。「いいねで」等のエンゲージ
+    ボーナス狙いの煽り文句は内容自体は許容できる場合もあるため半減に留める一方、
+    「限定」「有料」「教える」等の情報商材・有料予想の売り込みは常に除外する。
+    """
+    return _contains_any(candidate.text, solicitation_words)
+
+
 def _is_trusted(candidate: Candidate, trusted_authors: list[str]) -> bool:
     return candidate.author_screen_name in trusted_authors if trusted_authors else False
 
@@ -71,8 +82,10 @@ def preliminary_score(
     エンゲージメント速度だけで決めると、内容が薄い「バズっただけ」の投稿に
     偏るため、具体的なレース名・馬名を含む情報系投稿や、馬名+分析語の共起を
     含む考察系投稿を優遇し、config/ng_words.jsonの煽り系ワードを含む投稿は
-    割り引く。
+    割り引く。solicitation_words（有料予想の売り込み等）に該当する投稿は
+    フォロワー数取得の対象にする価値もないため、この時点で除外する。
     """
+    candidates = [c for c in candidates if not _is_solicitation(c, cfg.solicitation_words)]
     if not candidates:
         return []
     now = datetime.now(JST)
@@ -104,10 +117,17 @@ def final_ranking(
              + 信頼できる投稿者(公式・メディア等)0.15 + 考察性(馬名+分析語の共起)0.20
     さらに、config/ng_words.jsonの煽り系ワードを含む投稿は最終スコアを半減させる。
     単純ないいね数の多さや煽り文句だけで上位に来ないようにするため。
+    solicitation_words（有料予想の売り込み等）に該当する投稿はスコアに関わらず
+    ランキングから完全に除外する（半減では上位に残り得るため、ハード除外）。
+
+    top_n選出時、同一著者(author_id)の投稿が複数の枠を占めないよう著者単位で
+    重複排除する（1著者につき最上位1件のみ採用）。除外分は次点の別著者の候補で
+    埋め、top_nのスロット数自体は減らさない。
 
     各候補のスコア内訳(ScoreBreakdown)も併せて返す
     （db.save_score_factors()での実運用ログ用）。
     """
+    candidates = [c for c in candidates if not _is_solicitation(c, cfg.solicitation_words)]
     if not candidates:
         return []
     now = datetime.now(JST)
@@ -135,7 +155,15 @@ def final_ranking(
         scored.append((c, score, breakdown))
     scored.sort(key=lambda triple: triple[1], reverse=True)
 
-    top = scored[:top_n]
+    top = []
+    seen_authors: set[str] = set()
+    for c, score, breakdown in scored:
+        if c.author_id in seen_authors:
+            continue
+        seen_authors.add(c.author_id)
+        top.append((c, score, breakdown))
+        if len(top) >= top_n:
+            break
     return [
         (c, score, rank, breakdown) for rank, (c, score, breakdown) in enumerate(top, start=1)
     ]

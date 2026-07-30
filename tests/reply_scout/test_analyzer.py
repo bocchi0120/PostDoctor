@@ -11,7 +11,8 @@ def _cfg(**overrides) -> ScoutConfig:
     base = dict(
         keywords=["競馬"],
         specific_terms=[],
-        ng_words=["限定公開", "いいねで", "リポストで"],
+        ng_words=["いいねで", "リポストで"],
+        solicitation_words=["限定公開", "限定"],
         analysis_terms=["斤量", "適性"],
         trusted_authors=[],
         daily_read_limit=50,
@@ -49,7 +50,7 @@ def test_has_analytical_signal_requires_both_horse_name_and_term():
 
 def test_ng_words_halve_score_in_final_ranking():
     cfg = _cfg()
-    hype = _candidate("h", "限定公開の情報です！いいねで教えます", likes=100)
+    hype = _candidate("h", "いいねでリポストでお願いします！", likes=100)
     plain = _candidate("p", "普通の投稿です", likes=100)
 
     ranked = analyzer.final_ranking([hype, plain], cfg, frozenset(), top_n=10)
@@ -66,7 +67,7 @@ def test_analytical_post_outranks_hype_post_despite_fewer_likes():
     cfg = _cfg()
     horse_names = frozenset({"テストホース"})
     hype_bait = _candidate(
-        "bait", "限定公開！いいねでリポストで教えます、必勝情報！", likes=500
+        "bait", "いいねでリポストでお願いします、必勝情報！", likes=500
     )
     analytical = _candidate(
         "smart", "テストホースは斤量的にも適性的にも今回は狙えそう", likes=20
@@ -80,8 +81,55 @@ def test_analytical_post_outranks_hype_post_despite_fewer_likes():
 
 def test_preliminary_score_also_applies_ng_penalty():
     cfg = _cfg()
-    hype = _candidate("h", "限定公開！絶対当たる", likes=50)
+    hype = _candidate("h", "いいねでリポストでお願いします！", likes=50)
     plain = _candidate("p", "今日のレースについて", likes=50)
     scored = analyzer.preliminary_score([hype, plain], cfg, frozenset())
     by_id = {c.id: score for c, score in scored}
     assert by_id["h"] < by_id["p"]
+
+
+def test_solicitation_words_hard_excluded_from_final_ranking():
+    """問題3(B): 有料予想の売り込み等(solicitation_words)はスコア半減ではなく
+    ランキングから完全除外されるべき(ng_wordsの煽り語とは異なる扱い)。"""
+    cfg = _cfg()
+    solicit = _candidate("s", "今だけ限定で有料予想を教えます", likes=1000)
+    plain = _candidate("p", "普通の投稿です", likes=1)
+
+    ranked = analyzer.final_ranking([solicit, plain], cfg, frozenset(), top_n=10)
+    ids = [c.id for c, _score, _rank, _b in ranked]
+    assert "s" not in ids
+    assert "p" in ids
+
+
+def test_solicitation_words_excluded_from_preliminary_score():
+    cfg = _cfg()
+    solicit = _candidate("s", "今だけ限定で有料予想を教えます", likes=1000)
+    plain = _candidate("p", "普通の投稿です", likes=1)
+
+    scored = analyzer.preliminary_score([solicit, plain], cfg, frozenset())
+    ids = [c.id for c, _score in scored]
+    assert "s" not in ids
+    assert "p" in ids
+
+
+def test_final_ranking_dedups_by_author():
+    """問題2: 同一著者の投稿が複数枠を占めないよう著者単位で重複排除し、
+    次点の別著者候補で枠を埋める(top_nのスロット数は減らさない)。"""
+    cfg = _cfg()
+    same_author_high = Candidate(
+        id="a1", text="同じ人の投稿1", author_id="dup-author",
+        author_screen_name="dup", created_at=analyzer.datetime.now(analyzer.JST).isoformat(),
+        likes=100, retweets=0, replies=0, quotes=0, keyword="競馬", author_followers=100,
+    )
+    same_author_low = Candidate(
+        id="a2", text="同じ人の投稿2", author_id="dup-author",
+        author_screen_name="dup", created_at=analyzer.datetime.now(analyzer.JST).isoformat(),
+        likes=90, retweets=0, replies=0, quotes=0, keyword="競馬", author_followers=100,
+    )
+    other = _candidate("o", "別の人の投稿", likes=1)
+
+    ranked = analyzer.final_ranking(
+        [same_author_high, same_author_low, other], cfg, frozenset(), top_n=2
+    )
+    ids = [c.id for c, _score, _rank, _b in ranked]
+    assert ids == ["a1", "o"]

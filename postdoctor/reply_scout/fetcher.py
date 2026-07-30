@@ -33,6 +33,7 @@ class ScoutConfig:
     keywords: list[str]
     specific_terms: list[str]
     ng_words: list[str]
+    solicitation_words: list[str]
     analysis_terms: list[str]
     trusted_authors: list[str]
     daily_read_limit: int
@@ -67,6 +68,7 @@ def load_config() -> ScoutConfig:
         keywords=raw.get("keywords", []),
         specific_terms=raw.get("specific_terms", []),
         ng_words=_load_word_list(NG_WORDS_PATH, "ng_words"),
+        solicitation_words=_load_word_list(NG_WORDS_PATH, "solicitation_words"),
         analysis_terms=_load_word_list(ANALYSIS_TERMS_PATH, "analysis_terms"),
         trusted_authors=raw.get("trusted_authors", []),
         daily_read_limit=raw.get("daily_read_limit", 50),
@@ -156,6 +158,79 @@ def enrich_followers(account: Account, author_ids: list[str]) -> dict[str, int]:
         followers = (u.public_metrics or {}).get("followers_count", 0)
         result[str(u.id)] = followers
     return result
+
+
+def fetch_reply_responses(
+    account: Account, targets: list[db.TrackTarget], max_read: int | None = None
+) -> tuple[list[db.ReplyResponse], int]:
+    """送信済みリプライへの返信を取得し、author_idで自分/他者に分類する（他者のみ返す）。
+
+    scoutで収集する候補は "-is:reply" のトップレベル投稿のみなので、
+    candidate.id はその会話のconversation_idと一致する。これを利用して
+    候補（conversation_id）単位で会話全体を1回のsearch_recent_tweetsで取得し、
+    referenced_tweets(replied_to)がこのグループ内の送信済みリプライIDを指す
+    ツイートだけを「返信」として抽出する（会話に含まれる無関係な他者→元投稿者の
+    やり取りを誤検知しないため）。
+
+    max_read: 今回読み取ってよいツイート数の上限（呼び出し側がcfg.daily_read_limitと
+    本日のtweet_read使用量から残数を計算して渡す想定。scoutの候補収集と同じ
+    daily_read_limit予算を共有する）。Noneの場合は上限なし（テスト等での明示的な
+    無制限指定用途）。
+
+    戻り値: (他者からの返信のリスト, 今回APIから読み取ったツイート数)
+    """
+    if not targets or (max_read is not None and max_read <= 0):
+        return [], 0
+
+    by_candidate: dict[str, list[str]] = {}
+    for t in targets:
+        by_candidate.setdefault(t.candidate_id, []).append(t.reply_id)
+
+    client = build_client(account)
+    responses: list[db.ReplyResponse] = []
+    read_count = 0
+
+    for candidate_id, reply_ids in by_candidate.items():
+        if max_read is not None and read_count >= max_read:
+            break
+        reply_id_set = set(reply_ids)
+        query_max_results = 100 if max_read is None else min(100, max(10, max_read - read_count))
+        resp = client.search_recent_tweets(
+            query=f"conversation_id:{candidate_id}",
+            max_results=query_max_results,
+            tweet_fields=["created_at", "author_id", "referenced_tweets", "text"],
+            expansions=["author_id"],
+            user_fields=["username"],
+            user_auth=True,
+        )
+        if not resp.data:
+            continue
+        read_count += len(resp.data)
+        users_by_id = {u.id: u for u in (resp.includes or {}).get("users", [])}
+
+        for t in resp.data:
+            parent_id = next(
+                (str(ref.id) for ref in (t.referenced_tweets or []) if ref.type == "replied_to"),
+                None,
+            )
+            if parent_id not in reply_id_set:
+                continue
+            if str(t.author_id) == account.user_id:
+                continue  # 自分自身の返信（答え合わせリプ等）は対象外
+            user = users_by_id.get(t.author_id)
+            created_jst = t.created_at.astimezone(JST)
+            responses.append(
+                db.ReplyResponse(
+                    id=str(t.id),
+                    parent_reply_id=parent_id,
+                    author_id=str(t.author_id),
+                    author_username=user.username if user else None,
+                    text=t.text,
+                    created_at=created_jst.isoformat(),
+                )
+            )
+
+    return responses, read_count
 
 
 def fetch_own_reply_metrics(account: Account, reply_ids: list[str]) -> dict[str, dict]:

@@ -9,7 +9,7 @@ data/<account>/dashboard.html に保存する。
 from __future__ import annotations
 
 import html
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -23,6 +23,8 @@ from postdoctor.dashboard.colors import (
 )
 from postdoctor.prescription.generator import MIN_POSTS_FOR_CONFIDENCE, diagnose
 from postdoctor.reply_scout import db as rs_db
+from postdoctor.reply_scout import prediction_data as rs_prediction_data
+from postdoctor.reply_scout.fetcher import load_config as rs_load_config
 
 METRIC_LABELS = {
     "impressions": "インプレッション",
@@ -249,6 +251,21 @@ details.raw pre { white-space: pre-wrap; font-size: 12px; background: var(--surf
 .rs-draft-label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
 .rs-draft-text { font-size: 13px; white-space: pre-wrap; }
 .rs-actions { display: flex; gap: 8px; margin-top: 4px; }
+.rs-stale-warning { margin: 0; padding: 8px 12px; font-size: 12px; }
+
+.rs-alert-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  margin: 16px 0; padding: 12px 16px; border-radius: 8px; font-size: 14px; font-weight: 600;
+  background: color-mix(in srgb, var(--warning) 22%, var(--surface-1));
+  color: var(--warning-ink); border: 1px solid var(--warning);
+}
+.rs-response-list { display: flex; flex-direction: column; gap: 10px; margin: 12px 0; }
+.rs-response-card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.rs-response-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--text-secondary); }
+.rs-response-text { font-size: 13px; white-space: pre-wrap; margin: 6px 0; }
+.rs-response-links { display: flex; gap: 10px; font-size: 12px; }
+.rs-response-overdue { color: var(--warning-ink); font-weight: 600; }
+.rs-ack-btn { margin-top: 6px; }
 </style>
 """
 
@@ -356,6 +373,13 @@ REPLY_SCOUT_SCRIPT = """
   }
   document.querySelectorAll('.rs-sent-btn').forEach(function (btn) {
     btn.addEventListener('click', function () {
+      if (btn.dataset.stale === '1') {
+        var proceedStale = window.confirm(
+          '⚠ この下書きは予測データ更新前に生成されたものです（枠順確定などで評価が' +
+          '入れ替わっている可能性があります）。内容を確認せずに送信済みにしてよいですか？'
+        );
+        if (!proceedStale) return;
+      }
       var id = btn.dataset.id;
       var replyUrl = window.prompt('送信したリプライのURLまたはID（反応を追跡しない場合は空欄でOK）:', '');
       if (replyUrl === null) return;
@@ -381,6 +405,23 @@ REPLY_SCOUT_SCRIPT = """
         });
     });
   });
+  document.querySelectorAll('.rs-ack-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      fetch('/api/reply_scout/ack', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response_id: btn.dataset.responseId }),
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (data.ok) { location.reload(); }
+          else { window.alert('エラー: ' + data.error); }
+        })
+        .catch(function () {
+          window.alert('ローカルサーバーに接続できません。"python main.py serve" で起動してから開いてください。');
+        });
+    });
+  });
 })();
 </script>
 """
@@ -393,10 +434,29 @@ STATUS_CLASSES = {
 }
 
 
-def _reply_scout_candidate_card(account: Account, ranked: rs_db.RankedCandidate) -> str:
+def _reply_scout_candidate_card(
+    account: Account, ranked: rs_db.RankedCandidate, current_predictions_hash: str | None
+) -> str:
     c = ranked.candidate
     url = f"https://x.com/i/web/status/{c.id}"
     status_class = STATUS_CLASSES.get(ranked.status, "rs-status-pending")
+
+    # 下書き生成後にRakuba予測データ（predictions.json等）が更新されているかの判定。
+    # 枠順確定等で評価が入れ替わると、下書きが引用した事実文が公式投稿と矛盾しうる
+    # （実例: ダノンセンチュリー◎→アンパドゥ◎の入れ替わりで前日の下書きが陳腐化）。
+    # どちらかのハッシュが計算不能(None)な場合は比較不能として警告は出さない。
+    stale = bool(
+        ranked.drafts
+        and ranked.predictions_hash
+        and current_predictions_hash
+        and ranked.predictions_hash != current_predictions_hash
+    )
+    stale_html = (
+        '<p class="banner rs-stale-warning">⚠ 予測更新あり・再生成推奨'
+        '（下書き生成後にRakuba予測データが更新されました。事実文が古い可能性があります）</p>'
+        if stale
+        else ""
+    )
 
     if ranked.drafts:
         drafts_html = "".join(
@@ -419,6 +479,7 @@ def _reply_scout_candidate_card(account: Account, ranked: rs_db.RankedCandidate)
 
     followers = c.author_followers if c.author_followers is not None else "-"
     disabled = "" if ranked.status == "未送信" else "disabled"
+    stale_attr = ' data-stale="1"' if stale else ""
 
     return f"""
     <div class="card rs-card" data-candidate-id="{html.escape(c.id, quote=True)}">
@@ -429,9 +490,10 @@ def _reply_scout_candidate_card(account: Account, ranked: rs_db.RankedCandidate)
       </div>
       <p class="rs-original-text">{html.escape(c.text)}</p>
       <div class="rs-meta">スコア {ranked.score:.2f} ／ いいね {c.likes} ／ フォロワー {followers} ／ キーワード「{html.escape(c.keyword)}」</div>
+      {stale_html}
       {drafts_html}
       <div class="rs-actions">
-        <button class="btn-refresh rs-sent-btn" data-id="{html.escape(c.id, quote=True)}" {disabled}>送信済みにする</button>
+        <button class="btn-refresh rs-sent-btn" data-id="{html.escape(c.id, quote=True)}" {disabled}{stale_attr}>送信済みにする</button>
         <button class="btn-refresh rs-skip-btn" data-id="{html.escape(c.id, quote=True)}" {disabled}>見送り</button>
       </div>
     </div>
@@ -448,8 +510,95 @@ def _reply_scout_section(account: Account) -> str:
             f'<code>python main.py reply-scout run --account {html.escape(account.name)}</code> を実行してください。</p></div>'
         )
 
-    cards = "".join(_reply_scout_candidate_card(account, r) for r in ranked_list)
+    scout_cfg = rs_load_config()
+    pcfg = rs_prediction_data.load_prediction_config(scout_cfg.rakuba_output_dir)
+    current_predictions_hash = rs_prediction_data.compute_predictions_signature(pcfg)
+
+    cards = "".join(
+        _reply_scout_candidate_card(account, r, current_predictions_hash) for r in ranked_list
+    )
     return f'<div class="card-grid">{cards}</div>'
+
+
+JST = timezone(timedelta(hours=9))
+
+
+def _format_utc_as_jst(value: str | None) -> str | None:
+    """sent_at/last_checked_at(reply_scout/db.pyの_utc_now_iso()で保存、UTC)をJST表示に変換する。
+
+    過去分はオフセット無しの'YYYY-MM-DD HH:MM:SS'(暗黙にUTC)で保存されている
+    ことがある(_utc_now_iso()導入前のレコード)ため、tzinfoが無ければUTCとみなす。
+    以前はこの変換をせずUTC文字列をそのまま表示しており、実際の送信時刻から
+    9時間ズレて見えるバグがあった。
+    """
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(JST).strftime("%Y-%m-%d %H:%M")
+
+
+OVERDUE_HOURS = 48
+
+
+def _elapsed_hours(created_at_jst_iso: str) -> float:
+    dt = datetime.fromisoformat(created_at_jst_iso)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=JST)
+    return (datetime.now(JST) - dt.astimezone(JST)).total_seconds() / 3600
+
+
+def _format_elapsed(hours: float) -> str:
+    if hours < 1:
+        return f"{int(hours * 60)}分前"
+    if hours < 24:
+        return f"{int(hours)}時間前"
+    return f"{int(hours // 24)}日前"
+
+
+def _unacknowledged_responses_section(account: Account) -> str:
+    with rs_db.connect(account) as conn:
+        details = rs_db.get_unacknowledged_responses(conn)
+
+    if not details:
+        return ""
+
+    cards = []
+    for d in details:
+        r = d.response
+        hours = _elapsed_hours(r.created_at)
+        overdue_html = (
+            f'<span class="rs-response-overdue">⚠早めの返信推奨（{int(hours)}時間経過）</span>'
+            if hours > OVERDUE_HOURS
+            else ""
+        )
+        response_url = f"https://x.com/i/web/status/{r.id}"
+        parent_url = f"https://x.com/i/web/status/{r.parent_reply_id}"
+        author = f"@{r.author_username}" if r.author_username else r.author_id
+        cards.append(f"""
+        <div class="rs-response-card">
+          <div class="rs-response-head">
+            <strong>{html.escape(author)}</strong>
+            <span>{_format_elapsed(hours)}</span>
+            {overdue_html}
+          </div>
+          <p class="rs-response-text">{html.escape(r.text)}</p>
+          <div class="rs-response-links">
+            <a href="{html.escape(response_url, quote=True)}" target="_blank" rel="noopener">この返信を開く</a>
+            <a href="{html.escape(parent_url, quote=True)}" target="_blank" rel="noopener">元の自分のリプを開く</a>
+          </div>
+          <button class="btn-refresh rs-ack-btn" data-response-id="{html.escape(r.id, quote=True)}">対応済みにする</button>
+        </div>
+        """)
+
+    return f"""
+    <div class="rs-alert-banner">⚠ 未対応の返信 {len(details)}件</div>
+    <div class="rs-response-list">{"".join(cards)}</div>
+    """
 
 
 def _sent_replies_section(account: Account) -> str:
@@ -463,16 +612,16 @@ def _sent_replies_section(account: Account) -> str:
     for s in sent:
         reply_url = f"https://x.com/i/web/status/{s.reply_id}"
         target = f"@{s.author_screen_name}" if s.author_screen_name else "-"
-        checked = s.last_checked_at[:16] if s.last_checked_at else "未追跡"
+        checked = _format_utc_as_jst(s.last_checked_at) or "未追跡"
         rows.append(
             "<tr>"
-            f"<td>{s.sent_at[:16] if s.sent_at else '-'}</td>"
+            f"<td>{_format_utc_as_jst(s.sent_at) or '-'}</td>"
             f"<td><a href='{html.escape(reply_url, quote=True)}' target='_blank' rel='noopener'>リプライを開く</a></td>"
             f"<td>{html.escape(target)}</td>"
             f"<td class='num'>{s.impressions:,}</td>"
             f"<td class='num'>{s.likes:,}</td>"
             f"<td class='num'>{s.retweets:,}</td>"
-            f"<td class='num'>{s.replies:,}</td>"
+            f"<td class='num'>{s.other_reply_count:,}</td>"
             f"<td>{checked}</td>"
             "</tr>"
         )
@@ -481,14 +630,14 @@ def _sent_replies_section(account: Account) -> str:
       <table class="slots-table">
         <thead>
           <tr>
-            <th>送信日時</th><th>リプライ</th><th>対象アカウント</th>
+            <th>送信日時(JST)</th><th>リプライ</th><th>対象アカウント</th>
             <th class="num">インプレッション</th><th class="num">いいね</th>
-            <th class="num">RT</th><th class="num">リプライ数</th><th>最終追跡</th>
+            <th class="num">RT</th><th class="num">他者からの返信数</th><th>最終追跡(JST)</th>
           </tr>
         </thead>
         <tbody>{"".join(rows)}</tbody>
       </table>
-      <p class="muted" style="margin-top:8px;">📈 反応を追跡 ボタンで最新の値に更新できます。</p>
+      <p class="muted" style="margin-top:8px;">📈 反応を追跡 ボタンで最新の値に更新できます。他者からの返信数は直近14日以内に送信したリプライのみ検知対象です。</p>
     </div>
     """
 
@@ -538,6 +687,7 @@ def render_fragment(df: pd.DataFrame, account: Account, prescription_text: str) 
     diag_html = "".join(f"<li>{d}</li>" for d in diag_items)
 
     refresh_script = REFRESH_SCRIPT.replace("ACCOUNT_NAME", account.name)
+    unacknowledged_responses_section = _unacknowledged_responses_section(account)
     reply_scout_section = _reply_scout_section(account)
     sent_replies_section = _sent_replies_section(account)
 
@@ -611,6 +761,7 @@ def render_fragment(df: pd.DataFrame, account: Account, prescription_text: str) 
       <div id="rs-track-status" class="refresh-status"></div>
     </div>
   </div>
+  {unacknowledged_responses_section}
   {reply_scout_section}
 
   <h2>送信済みリプライの反応</h2>

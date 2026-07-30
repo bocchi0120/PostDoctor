@@ -17,6 +17,7 @@ C:\\Projects\\Rakuba\\ops\\x_post.py の _full_mark()/build_result_draft() と
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -122,6 +123,35 @@ def load_all_predictions(pcfg: PredictionConfig) -> list[HorseRow]:
             merged[(row.race_key, row.uma_code)] = row
 
     return list(merged.values())
+
+
+def compute_predictions_signature(pcfg: PredictionConfig) -> str | None:
+    """rolling + snapshotファイル群の内容から決定的なハッシュを計算する。
+
+    下書き生成時にこの値をdrafts.predictions_hashへ保存しておき、表示・
+    送信済み操作の各タイミングで再計算した値と突き合わせる。枠順確定等で
+    predictions.jsonが更新された後に、古い評価を引用したままの下書きが
+    残留する（公式投稿と矛盾するリスク）ことを検知するためのもの。
+    出力ディレクトリが無い場合はNone（比較不能=警告なし扱い）。
+    """
+    if not pcfg.output_dir or not pcfg.output_dir.is_dir():
+        return None
+
+    paths = sorted(
+        p for p in pcfg.output_dir.glob("predictions_*.json") if SNAPSHOT_RE.fullmatch(p.name)
+    )
+    rolling_path = pcfg.output_dir / pcfg.rolling_filename
+    if rolling_path.exists():
+        paths.append(rolling_path)
+
+    digest = hashlib.sha256()
+    for path in paths:
+        try:
+            digest.update(path.name.encode("utf-8"))
+            digest.update(path.read_bytes())
+        except OSError:
+            continue
+    return digest.hexdigest()
 
 
 def load_race_results(pcfg: PredictionConfig) -> dict[str, dict[str, dict]]:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Iterator
 
 import pandas as pd
@@ -83,6 +84,10 @@ def set_since_id(conn: sqlite3.Connection, since_id: str) -> None:
 
 
 def upsert_posts(conn: sqlite3.Connection, posts: list[PostRecord]) -> int:
+    # fetched_atは記帳用の内部タイムスタンプ(UTC ISO8601)。created_atとは異なり、
+    # fetcher層でJST変換済みではないので混同しないこと（reply_scout/db.pyの
+    # _utc_now_iso()と同じ規約）。
+    fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     for p in posts:
         conn.execute(
             """
@@ -90,7 +95,7 @@ def upsert_posts(conn: sqlite3.Connection, posts: list[PostRecord]) -> int:
               (id, created_at, weekday, hour, text,
                impressions, likes, retweets, replies, quotes, bookmarks,
                fetched_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?, datetime('now'))
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET
               impressions=excluded.impressions,
               likes=excluded.likes,
@@ -103,6 +108,7 @@ def upsert_posts(conn: sqlite3.Connection, posts: list[PostRecord]) -> int:
             (
                 p.id, p.created_at, p.weekday, p.hour, p.text,
                 p.impressions, p.likes, p.retweets, p.replies, p.quotes, p.bookmarks,
+                fetched_at,
             ),
         )
     conn.commit()

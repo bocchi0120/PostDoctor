@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from postdoctor.reply_scout import prediction_data as pd
 
 
@@ -155,6 +157,30 @@ def test_find_match_category_miss_high_when_high_eval_and_bad_result(pcfg):
     assert m is not None
     assert m.category == pd.CATEGORY_MISS_HIGH
     assert "5着" in m.fact_sentence
+
+
+def test_compute_predictions_signature_none_when_dir_missing(tmp_path):
+    pcfg = pd.load_prediction_config(str(tmp_path / "does_not_exist"))
+    assert pd.compute_predictions_signature(pcfg) is None
+
+
+def test_compute_predictions_signature_stable_for_unchanged_content(tmp_path):
+    (tmp_path / "predictions.json").write_text(json.dumps({"races": []}), encoding="utf-8")
+    pcfg = pd.load_prediction_config(str(tmp_path))
+    assert pd.compute_predictions_signature(pcfg) == pd.compute_predictions_signature(pcfg)
+
+
+def test_compute_predictions_signature_changes_when_rolling_file_updates(tmp_path):
+    """枠順確定等でpredictions.jsonの内容が変わると指紋も変わる（下書きの陳腐化検知）。"""
+    path = tmp_path / "predictions.json"
+    path.write_text(json.dumps({"races": [{"race_key": "R1", "horses": []}]}), encoding="utf-8")
+    pcfg = pd.load_prediction_config(str(tmp_path))
+    before = pd.compute_predictions_signature(pcfg)
+
+    path.write_text(json.dumps({"races": [{"race_key": "R1", "horses": [{"uma_num": 1}]}]}), encoding="utf-8")
+    after = pd.compute_predictions_signature(pcfg)
+
+    assert before != after
 
 
 def test_fact_sentence_numbers_trace_to_fixture_data(pcfg):
