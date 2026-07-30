@@ -6,6 +6,8 @@ For knowledge that spans both this project and the sibling `Rakuba` project (JRA
 backend), see `C:\Projects\CLAUDE.md` — that file covers the data contract for
 `Rakuba/backend/output/` and the weekly JV-Link publish rhythm. This file covers PostDoctor only.
 
+Before any large design change, consult `docs/design_decisions.md` for the rationale behind past decisions.
+
 ## What this is
 
 PostDoctor analyzes how an X (Twitter) account's own posts perform (`fetch`/`analyze`/`prescribe`/
