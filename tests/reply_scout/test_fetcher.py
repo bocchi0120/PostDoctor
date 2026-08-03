@@ -72,11 +72,12 @@ class _Ref:
 
 
 class _Tweet:
-    def __init__(self, id_, author_id, text, referenced_tweets=None):
+    def __init__(self, id_, author_id, text, referenced_tweets=None, public_metrics=None):
         self.id = id_
         self.author_id = author_id
         self.text = text
         self.referenced_tweets = referenced_tweets or []
+        self.public_metrics = public_metrics or {}
         self.created_at = datetime(2026, 7, 28, 1, 0, 0, tzinfo=timezone.utc)
 
 
@@ -100,6 +101,43 @@ class _FakeClient:
     def search_recent_tweets(self, query, **kwargs):
         self.queries.append(query)
         return self._responses_by_query.get(query, _Resp([]))
+
+
+def _scout_cfg(**overrides) -> fetcher.ScoutConfig:
+    base = dict(
+        keywords=["競馬"], ng_words=[], solicitation_words=[], analysis_terms=[],
+        trusted_authors=[], daily_read_limit=50, min_likes=0, min_replies=0,
+        top_user_lookup_limit=15, claude_model="claude-sonnet-5",
+        draft_top_n=5, rakuba_output_dir="",
+    )
+    base.update(overrides)
+    return fetcher.ScoutConfig(**base)
+
+
+def test_collect_candidates_flags_quote_tweets(tmp_path, monkeypatch):
+    from postdoctor import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    account = Account(name="rakuba_ai", screen_name="rakuba_ai", user_id="999")
+
+    quote_tweet = _Tweet(
+        "t-quote", author_id="1", text="🥳 https://t.co/x",
+        referenced_tweets=[_Ref("quoted", "orig-1")],
+    )
+    plain_tweet = _Tweet("t-plain", author_id="2", text="普通の投稿です")
+    fake_resp = _Resp(
+        [quote_tweet, plain_tweet], users=[_User("1", "quoter"), _User("2", "plain_user")]
+    )
+    fake_client = _FakeClient({"競馬 -is:retweet -is:reply lang:ja": fake_resp})
+    monkeypatch.setattr(fetcher, "build_client", lambda account: fake_client)
+
+    with db.connect(account) as conn:
+        candidates, read_count = fetcher.collect_candidates(account, conn, _scout_cfg())
+
+    assert read_count == 2
+    by_id = {c.id: c for c in candidates}
+    assert by_id["t-quote"].is_quote is True
+    assert by_id["t-plain"].is_quote is False
 
 
 def test_fetch_reply_responses_excludes_self_and_unrelated_conversation_replies(monkeypatch):

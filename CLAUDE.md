@@ -158,9 +158,17 @@ instead.
   `credential_prefix`).
 - `config/keywords.json` — reply_scout search keywords, `daily_read_limit`, `min_likes`,
   `top_user_lookup_limit`, `draft_top_n`, `claude_model`, `rakuba_output_dir` (path to Rakuba's
-  `backend/output/`), `specific_terms` (informational-post bonus), `trusted_authors`. `draft_top_n`
-  must be kept in sync with the dashboard's display count (`top_n=10`, hardcoded in
-  `orchestrator.run_scout()`) — there is no shared constant enforcing this.
+  `backend/output/`), `trusted_authors`. `draft_top_n` must be kept in sync with the dashboard's
+  display count (`top_n=10`, hardcoded in `orchestrator.run_scout()`) — there is no shared constant
+  enforcing this. `trusted_authors` starts curated (not empty) as of 2026-08-03; add an account only
+  once it has (a) actually replied to one of our sent replies (`other_reply_count>0`, surfaced via
+  the dashboard's unacknowledged-reply alert) or (b) produced impressions on `score_review.csv`
+  clearly above what its follower count would predict — don't add speculatively.
+- Topic specificity (formerly a `specific_terms` word list in `config/keywords.json`, now removed)
+  is no longer config-driven: `analyzer._specificity()` checks candidate text against the real
+  horse/race names from `prediction_data.all_horse_names()`/`all_race_names()` (the same data
+  `run_scout()` already loads for the analytical-signal bonus) — a static word list would only ever
+  duplicate and go stale against that live data.
 - `config/ng_words.json` — two separate tiers, not interchangeable: `ng_words` (engagement-bait
   language like "いいねで"/"プレゼント" — halves the candidate's score but doesn't exclude it) and
   `solicitation_words` (paid-tip-selling language like "限定"/"有料"/"教える" — excluded from

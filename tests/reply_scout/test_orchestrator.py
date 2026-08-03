@@ -13,7 +13,7 @@ def _account(tmp_path, monkeypatch) -> Account:
 
 def _cfg(daily_read_limit: int) -> ScoutConfig:
     return ScoutConfig(
-        keywords=["競馬"], specific_terms=[], ng_words=[], solicitation_words=[], analysis_terms=[],
+        keywords=["競馬"], ng_words=[], solicitation_words=[], analysis_terms=[],
         trusted_authors=[], daily_read_limit=daily_read_limit, min_likes=5, min_replies=0,
         top_user_lookup_limit=15, claude_model="claude-sonnet-5",
         draft_top_n=5, rakuba_output_dir="",
@@ -30,6 +30,51 @@ def _seed_sent_reply(account: Account, candidate_id: str, reply_id: str) -> None
             )
         ])
         db.update_status(conn, candidate_id, "送信済み", reply_id=reply_id)
+
+
+def _seed_scored_sent_reply(
+    account: Account, candidate_id: str, reply_id: str, velocity_norm: float, impressions: int
+) -> None:
+    """score_factors + sent_replies(impressions付き)を1件分作る、相関計算テスト用のヘルパー。"""
+    _seed_sent_reply(account, candidate_id, reply_id)
+    with db.connect(account) as conn:
+        db.save_score_factors(
+            conn, candidate_id,
+            velocity_norm=velocity_norm, follower_norm=0.5, specificity=0.0,
+            trusted=0.0, analytical=0.0, ng_penalty_applied=False, final_score=velocity_norm,
+        )
+        db.update_sent_reply_metrics(conn, reply_id, impressions=impressions, likes=0, retweets=0, replies=0)
+
+
+def test_summarize_score_correlations_flags_zero_variance_columns(tmp_path, monkeypatch):
+    """specificity/trustedのように全件同値(分散ゼロ)の列はSpearman相関が定義できないため、
+    NaNを出さず「分散なし」と明記する。velocity_normのように分散がある列は数値を出す。"""
+    account = _account(tmp_path, monkeypatch)
+    for i, (v, imp) in enumerate([(0.1, 5), (0.5, 20), (0.9, 80)]):
+        _seed_scored_sent_reply(account, f"cand-{i}", f"reply-{i}", velocity_norm=v, impressions=imp)
+
+    lines = orchestrator.summarize_score_correlations(account)
+    joined = "\n".join(lines)
+    assert "specificity: 分散なし" in joined
+    assert "trusted: 分散なし" in joined
+    assert "velocity_norm: Spearman相関 1.000" in joined
+
+
+def test_summarize_score_correlations_recommends_review_above_threshold(tmp_path, monkeypatch):
+    account = _account(tmp_path, monkeypatch)
+    for i in range(31):
+        _seed_scored_sent_reply(account, f"cand-{i}", f"reply-{i}", velocity_norm=i / 31, impressions=i + 1)
+
+    lines = orchestrator.summarize_score_correlations(account)
+    assert any("30件を超えました" in line for line in lines)
+
+
+def test_summarize_score_correlations_silent_below_threshold(tmp_path, monkeypatch):
+    account = _account(tmp_path, monkeypatch)
+    _seed_scored_sent_reply(account, "cand-0", "reply-0", velocity_norm=0.5, impressions=10)
+
+    lines = orchestrator.summarize_score_correlations(account)
+    assert not any("30件を超えました" in line for line in lines)
 
 
 def test_run_track_skips_reply_detection_when_daily_budget_already_used(tmp_path, monkeypatch):

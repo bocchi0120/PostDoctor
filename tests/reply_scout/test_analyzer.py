@@ -10,7 +10,6 @@ from postdoctor.reply_scout.fetcher import ScoutConfig
 def _cfg(**overrides) -> ScoutConfig:
     base = dict(
         keywords=["競馬"],
-        specific_terms=[],
         ng_words=["いいねで", "リポストで"],
         solicitation_words=["限定公開", "限定"],
         analysis_terms=["斤量", "適性"],
@@ -27,12 +26,14 @@ def _cfg(**overrides) -> ScoutConfig:
     return ScoutConfig(**base)
 
 
-def _candidate(cid: str, text: str, likes: int, hours_ago: float = 1.0) -> Candidate:
+def _candidate(
+    cid: str, text: str, likes: int, hours_ago: float = 1.0, is_quote: bool = False
+) -> Candidate:
     created = analyzer.datetime.now(analyzer.JST) - timedelta(hours=hours_ago)
     return Candidate(
         id=cid, text=text, author_id=f"a-{cid}", author_screen_name=f"user{cid}",
         created_at=created.isoformat(), likes=likes, retweets=0, replies=0, quotes=0,
-        keyword="競馬", author_followers=100,
+        keyword="競馬", author_followers=100, is_quote=is_quote,
     )
 
 
@@ -46,6 +47,56 @@ def test_has_analytical_signal_requires_both_horse_name_and_term():
     assert analyzer._has_analytical_signal(with_both, horse_names, cfg.analysis_terms) is True
     assert analyzer._has_analytical_signal(only_term, horse_names, cfg.analysis_terms) is False
     assert analyzer._has_analytical_signal(only_name, horse_names, cfg.analysis_terms) is False
+
+
+def test_specificity_matches_horse_name_or_race_name_from_rakuba_data():
+    """specificityはconfigの語彙リストではなく、prediction_dataが返す実在の
+    馬名・レース名集合を直接参照する（旧specific_termsの再設計後の挙動）。"""
+    horse_names = frozenset({"テストホース"})
+    race_names = frozenset({"函館記念"})
+    by_horse = _candidate("h", "テストホースが今回は狙えそう", 10)
+    by_race = _candidate("r", "函館記念は荒れそうですね", 10)
+    neither = _candidate("n", "今週も競馬を楽しみましょう", 10)
+
+    assert analyzer._specificity(by_horse, horse_names, race_names) == 1.0
+    assert analyzer._specificity(by_race, horse_names, race_names) == 1.0
+    assert analyzer._specificity(neither, horse_names, race_names) == 0.0
+
+
+def test_specificity_ignores_names_shorter_than_min_length():
+    short_name = frozenset({"一"})
+    candidate = _candidate("s", "一番人気はどれかな", 10)
+    assert analyzer._specificity(candidate, short_name, frozenset()) == 0.0
+
+
+def test_is_low_content_quote_true_only_for_quote_with_no_real_comment():
+    silent_quote = _candidate(
+        "sq", "🔥🥳 https://t.co/abc123", 10, is_quote=True
+    )
+    commented_quote = _candidate(
+        "cq", "これは絶対に来る、狙い目だと思う https://t.co/abc123", 10, is_quote=True
+    )
+    plain_post = _candidate("p", "🔥🥳", 10, is_quote=False)
+
+    assert analyzer._is_low_content_quote(silent_quote) is True
+    assert analyzer._is_low_content_quote(commented_quote) is False
+    assert analyzer._is_low_content_quote(plain_post) is False
+
+
+def test_low_content_quotes_hard_excluded_from_final_ranking_and_preliminary_score():
+    silent_quote = _candidate("sq", "🔥🥳 https://t.co/abc123", likes=1000, is_quote=True)
+    plain = _candidate("p", "普通の投稿です", likes=1)
+    cfg = _cfg()
+
+    ranked = analyzer.final_ranking([silent_quote, plain], cfg, frozenset(), top_n=10)
+    ids = [c.id for c, _score, _rank, _b in ranked]
+    assert "sq" not in ids
+    assert "p" in ids
+
+    scored = analyzer.preliminary_score([silent_quote, plain], cfg, frozenset())
+    ids2 = [c.id for c, _score in scored]
+    assert "sq" not in ids2
+    assert "p" in ids2
 
 
 def test_ng_words_halve_score_in_final_ranking():
@@ -133,3 +184,31 @@ def test_final_ranking_dedups_by_author():
     )
     ids = [c.id for c, _score, _rank, _b in ranked]
     assert ids == ["a1", "o"]
+
+
+def test_topic_key_prefers_longest_match_and_none_when_no_match():
+    horse_names = frozenset({"テスト", "テストホース"})
+    both = _candidate("b", "テストホースが今回は狙えそう", 10)
+    neither = _candidate("n", "今週も競馬を楽しみましょう", 10)
+
+    assert analyzer._topic_key(both, horse_names) == "テストホース"
+    assert analyzer._topic_key(neither, horse_names) is None
+
+
+def test_final_ranking_dedups_by_topic_across_different_authors():
+    """新種の重複: 著者は別人でも同じ馬について書かれた投稿が複数あると、
+    fact_sentenceがほぼ同一のリプライを別々のアカウントに送ることになるため、
+    著者dedupとは別に馬名(トピック)単位でも重複排除する。"""
+    cfg = _cfg()
+    horse_names = frozenset({"テストホース"})
+    same_topic_high = _candidate("t1", "テストホースが強かった、期待できる", likes=100)
+    same_topic_low = _candidate("t2", "テストホースについて一言、注目している", likes=50)
+    same_topic_lowest = _candidate("t3", "テストホースの話題、気になるところ", likes=10)
+    other_topic = _candidate("o", "別の話題の投稿", likes=1)
+
+    ranked = analyzer.final_ranking(
+        [same_topic_high, same_topic_low, same_topic_lowest, other_topic],
+        cfg, horse_names, top_n=2,
+    )
+    ids = [c.id for c, _score, _rank, _b in ranked]
+    assert ids == ["t1", "o"]

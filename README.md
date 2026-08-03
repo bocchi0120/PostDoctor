@@ -120,12 +120,17 @@ python main.py reply-scout status --account rakuba_ai --id <tweet_id> --status �
 ```
 
 - 検索キーワード・日次読み取り上限・フォロワー取得上限などは `config/keywords.json` で編集する
-- スコアは「エンゲージメント速度＋フォロワー数」だけでなく、以下も加味する
-  （**`specific_terms`・`hype_terms`・`trusted_authors` は初期状態では空なので、
-  効かせるには自分で値を追加すること**）:
-  - `specific_terms`: レース名・馬名など具体的な語を含む投稿を優遇（例: `["函館記念", "○○賞", "馬名A"]`）
-  - `hype_terms`: 「限定」「教える」等の煽り系ワードを含む投稿はスコアを半減（初期値は最低限のサンプルのみ）
-  - `trusted_authors`: メディア公式・信頼できるアカウントのスクリーンネームを優遇
+- スコアは「エンゲージメント速度＋フォロワー数」だけでなく、以下も加味する:
+  - 具体性（旧`specific_terms`）: 設定不要。Rakubaの予測データ（実在の馬名・レース名）を
+    `prediction_data.all_horse_names()`/`all_race_names()`経由で直接参照し、候補本文が
+    それらを名指ししていれば加点する（`postdoctor/reply_scout/analyzer.py`の`_specificity()`）
+  - `config/ng_words.json`の`ng_words`（煽り系ワード、スコア半減）と`solicitation_words`
+    （有料予想の売り込み等、ランキングから完全除外）
+  - `trusted_authors`（`config/keywords.json`）: メディア公式・信頼できるアカウントの
+    スクリーンネームを優遇。初期状態では空なので効かせるには自分で追加すること。
+    追加基準: (a) こちらの送信済みリプライに実際に返信をくれた実績、または
+    (b) `score_review.csv`上でこのアカウント宛のインプレッションがフォロワー数から
+    期待される水準を明確に上回った実績、のいずれかを満たしたアカウント
 - Rakubaの予測データは `data/<account>/predictions.json`
   （`[{"race_name": "...", "date": "...", "summary": "..."}]`）に手動で配置すると、
   レース名が一致する候補への下書きに根拠として引用される

@@ -35,6 +35,14 @@ def test_load_all_predictions_rolling_wins_over_snapshot(pcfg):
     assert h0001.score == 0.95
 
 
+def test_all_race_names_excludes_blank_race_names(pcfg):
+    rows = pd.load_all_predictions(pcfg)
+    names = pd.all_race_names(rows)
+    assert "テストステークス" in names
+    assert "関屋記念" in names
+    assert "" not in names
+
+
 def test_confirmed_race_keys(pcfg):
     results = pd.load_race_results(pcfg)
     confirmed = pd.confirmed_race_keys(results)

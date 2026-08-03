@@ -118,6 +118,8 @@ def cmd_reply_scout_status(account: Account, tweet_id: str, status: str, reply_i
 def cmd_reply_scout_scorecard(account: Account) -> None:
     out = rs_orchestrator.export_score_review(account)
     print(f"[{account.name}] reply-scout: スコア妥当性検証用CSVを書き出しました: {out}")
+    for line in rs_orchestrator.summarize_score_correlations(account):
+        print(f"[{account.name}] reply-scout: {line}")
 
 
 def build_parser() -> argparse.ArgumentParser:

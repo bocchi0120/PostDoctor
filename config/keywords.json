@@ -1,7 +1,6 @@
 {
   "keywords": ["函館記念", "重賞", "競馬予想"],
-  "specific_terms": [],
-  "trusted_authors": [],
+  "trusted_authors": ["keiba_hip", "ublGsoTF98TwgdC", "0630yukihiro", "jyuda_keiba"],
   "daily_read_limit": 50,
   "min_likes": 5,
   "min_replies": 0,

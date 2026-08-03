@@ -31,7 +31,6 @@ USER_READ_COST = 0.010
 @dataclass(frozen=True)
 class ScoutConfig:
     keywords: list[str]
-    specific_terms: list[str]
     ng_words: list[str]
     solicitation_words: list[str]
     analysis_terms: list[str]
@@ -66,7 +65,6 @@ def load_config() -> ScoutConfig:
     raw = json.loads(KEYWORDS_PATH.read_text(encoding="utf-8"))
     return ScoutConfig(
         keywords=raw.get("keywords", []),
-        specific_terms=raw.get("specific_terms", []),
         ng_words=_load_word_list(NG_WORDS_PATH, "ng_words"),
         solicitation_words=_load_word_list(NG_WORDS_PATH, "solicitation_words"),
         analysis_terms=_load_word_list(ANALYSIS_TERMS_PATH, "analysis_terms"),
@@ -105,7 +103,9 @@ def collect_candidates(
         resp = client.search_recent_tweets(
             query=query,
             max_results=min(100, max(10, remaining - read_count)),
-            tweet_fields=["created_at", "public_metrics", "text", "author_id"],
+            tweet_fields=[
+                "created_at", "public_metrics", "text", "author_id", "referenced_tweets",
+            ],
             expansions=["author_id"],
             user_fields=["username"],
             user_auth=True,
@@ -129,6 +129,7 @@ def collect_candidates(
             user = users_by_id.get(t.author_id)
             screen_name = user.username if user else str(t.author_id)
             created_jst = t.created_at.astimezone(JST)
+            is_quote = any(ref.type == "quoted" for ref in (t.referenced_tweets or []))
             collected.append(
                 db.Candidate(
                     id=str(t.id),
@@ -141,6 +142,7 @@ def collect_candidates(
                     replies=replies_n,
                     quotes=m.get("quote_count", 0),
                     keyword=keyword,
+                    is_quote=is_quote,
                 )
             )
 

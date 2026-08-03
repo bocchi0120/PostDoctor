@@ -214,6 +214,11 @@ def all_horse_names(rows: list[HorseRow]) -> set[str]:
     return {r.uma_name for r in rows if r.uma_name}
 
 
+def all_race_names(rows: list[HorseRow]) -> set[str]:
+    """既知のレース名集合。analyzer.pyの具体性判定（馬名またはレース名の名指し）に使う。"""
+    return {r.race_name for r in rows if r.race_name}
+
+
 # 結果カテゴリ: 評価の高低×実際の好走/凡走で4分類し、fact_sentenceとClaudeへの
 # トーン指示の両方をこれに応じて分岐させる（外れも含めて誠実に開示する方針のため、
 # 隠したり弱めたりはしない。トーンだけをカテゴリに応じて変える）。

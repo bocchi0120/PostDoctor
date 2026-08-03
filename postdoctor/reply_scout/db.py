@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS reply_responses (
 # init_db()側でPRAGMA table_infoを見て無ければALTER TABLEする。
 _CANDIDATES_MIGRATIONS = [
     ("prediction_status", "ALTER TABLE candidates ADD COLUMN prediction_status TEXT"),
+    ("is_quote", "ALTER TABLE candidates ADD COLUMN is_quote INTEGER DEFAULT 0"),
 ]
 
 # draftsテーブルへの追加カラム。predictions_hashは下書き生成時点のRakuba予測データの
@@ -121,6 +122,7 @@ class Candidate:
     quotes: int
     keyword: str
     author_followers: int | None = None
+    is_quote: bool = False
 
 
 @dataclass(frozen=True)
@@ -180,14 +182,14 @@ def insert_candidates(conn: sqlite3.Connection, candidates: list[Candidate]) -> 
             """
             INSERT INTO candidates
               (id, text, author_id, author_screen_name, author_followers,
-               created_at, likes, retweets, replies, quotes, keyword, fetched_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+               created_at, likes, retweets, replies, quotes, keyword, fetched_at, is_quote)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO NOTHING
             """,
             (
                 c.id, c.text, c.author_id, c.author_screen_name, c.author_followers,
                 c.created_at, c.likes, c.retweets, c.replies, c.quotes, c.keyword,
-                _utc_now_iso(),
+                _utc_now_iso(), int(c.is_quote),
             ),
         )
         count += cur.rowcount
@@ -209,7 +211,7 @@ def load_scoring_candidates(conn: sqlite3.Connection) -> list[Candidate]:
     rows = conn.execute(
         """
         SELECT id, text, author_id, author_screen_name, author_followers,
-               created_at, likes, retweets, replies, quotes, keyword
+               created_at, likes, retweets, replies, quotes, keyword, is_quote
         FROM candidates
         WHERE status = '未送信'
         """
@@ -218,7 +220,7 @@ def load_scoring_candidates(conn: sqlite3.Connection) -> list[Candidate]:
         Candidate(
             id=r[0], text=r[1], author_id=r[2], author_screen_name=r[3],
             author_followers=r[4], created_at=r[5], likes=r[6], retweets=r[7],
-            replies=r[8], quotes=r[9], keyword=r[10],
+            replies=r[8], quotes=r[9], keyword=r[10], is_quote=bool(r[11]),
         )
         for r in rows
     ]
@@ -265,7 +267,7 @@ def save_drafts(
 _RANKED_SELECT = """
     SELECT id, text, author_id, author_screen_name, author_followers,
            created_at, likes, retweets, replies, quotes, keyword,
-           score, rank, status, prediction_status
+           score, rank, status, prediction_status, is_quote
     FROM candidates
     WHERE rank IS NOT NULL
 """
@@ -275,7 +277,7 @@ def _row_to_ranked(conn: sqlite3.Connection, r) -> RankedCandidate:
     candidate = Candidate(
         id=r[0], text=r[1], author_id=r[2], author_screen_name=r[3],
         author_followers=r[4], created_at=r[5], likes=r[6], retweets=r[7],
-        replies=r[8], quotes=r[9], keyword=r[10],
+        replies=r[8], quotes=r[9], keyword=r[10], is_quote=bool(r[15]),
     )
     draft_rows = conn.execute(
         "SELECT draft_text, predictions_hash FROM drafts WHERE candidate_id=? ORDER BY variant",

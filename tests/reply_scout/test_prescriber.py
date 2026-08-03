@@ -30,7 +30,7 @@ def _candidate(cid: str, text: str) -> Candidate:
 
 def _cfg() -> ScoutConfig:
     return ScoutConfig(
-        keywords=["競馬"], specific_terms=[], ng_words=[], solicitation_words=[], analysis_terms=[],
+        keywords=["競馬"], ng_words=[], solicitation_words=[], analysis_terms=[],
         trusted_authors=[], daily_read_limit=50, min_likes=5, min_replies=0,
         top_user_lookup_limit=15, claude_model="claude-sonnet-5",
         draft_top_n=5, rakuba_output_dir=str(FIXTURES_DIR),
@@ -44,6 +44,37 @@ def _find_match(text: str):
     confirmed = prediction_data.confirmed_race_keys(results)
     match, _reason = prediction_data.find_match(text, rows, results, confirmed)
     return match
+
+
+def test_system_prompt_warns_against_misreading_addressee():
+    """rank#4の実例（候補投稿の応援コメントを自分(Rakuba)宛と誤読して
+    「応援ありがとうございます」と返した）の回帰防止。候補は第三者の独立投稿であり
+    Rakuba宛の言及ではあり得ない、という前提がシステムプロンプトに明記されていること。"""
+    assert "第三者の独立した投稿" in prescriber.SYSTEM_PROMPT
+    assert "Rakuba自身に" in prescriber.SYSTEM_PROMPT
+
+
+def test_generate_drafts_sends_system_prompt_to_claude(monkeypatch):
+    """SYSTEM_PROMPTの内容が実際にAPI呼び出しのsystemパラメータとして渡ることを確認する
+    （定数の中身だけでなく、_call_claude()が実際にそれを使っていることの回帰テスト）。"""
+    match = _find_match("テストホースイチが強かった")
+    assert match is not None
+    captured = {}
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return _FakeResponse('{"reactions": ["いい馬ですよね", "気になる存在です"]}')
+
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr(prescriber, "_client", lambda: _FakeClient())
+    candidate = _candidate("c1", "テストホースイチが強かった")
+    prescriber.generate_drafts(candidate, match, model="claude-sonnet-5")
+
+    assert captured["system"] == prescriber.SYSTEM_PROMPT
+    assert "第三者の独立した投稿" in captured["system"]
 
 
 def test_generate_drafts_combines_fact_sentence_verbatim(monkeypatch):
