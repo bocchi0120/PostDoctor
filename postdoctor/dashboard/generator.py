@@ -202,6 +202,9 @@ STYLE = """
 .slots-table td { padding: 6px 8px; border-bottom: 1px solid var(--gridline); font-variant-numeric: tabular-nums; }
 .slots-table td.num, .slots-table th.num { text-align: right; }
 
+.sent-replies-scroll { max-height: 640px; overflow-y: auto; }
+.sent-replies-scroll thead th { position: sticky; top: 0; background: var(--surface-1); z-index: 1; }
+
 .diag-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.9; color: var(--text-secondary); }
 details.raw { margin-top: 16px; }
 details.raw summary { cursor: pointer; font-size: 13px; color: var(--text-secondary); }
@@ -627,17 +630,19 @@ def _sent_replies_section(account: Account) -> str:
         )
     return f"""
     <div class="card">
-      <table class="slots-table">
-        <thead>
-          <tr>
-            <th>送信日時(JST)</th><th>リプライ</th><th>対象アカウント</th>
-            <th class="num">インプレッション</th><th class="num">いいね</th>
-            <th class="num">RT</th><th class="num">他者からの返信数</th><th>最終追跡(JST)</th>
-          </tr>
-        </thead>
-        <tbody>{"".join(rows)}</tbody>
-      </table>
-      <p class="muted" style="margin-top:8px;">📈 反応を追跡 ボタンで最新の値に更新できます。他者からの返信数は直近14日以内に送信したリプライのみ検知対象です。</p>
+      <div class="sent-replies-scroll">
+        <table class="slots-table">
+          <thead>
+            <tr>
+              <th>送信日時(JST)</th><th>リプライ</th><th>対象アカウント</th>
+              <th class="num">インプレッション</th><th class="num">いいね</th>
+              <th class="num">RT</th><th class="num">他者からの返信数</th><th>最終追跡(JST)</th>
+            </tr>
+          </thead>
+          <tbody>{"".join(rows)}</tbody>
+        </table>
+      </div>
+      <p class="muted" style="margin-top:8px;">📈 反応を追跡 ボタンで最新の値に更新できます。他者からの返信数は直近14日以内に送信したリプライのみ検知対象です。（新しい順に表示、20件を超える分はこの表内でスクロールして確認できます）</p>
     </div>
     """
 
