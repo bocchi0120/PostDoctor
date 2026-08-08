@@ -51,6 +51,30 @@
       "horses": [
         {"pred_rank": 1, "uma_num": 0, "waku_num": 0, "uma_code": "H0005", "uma_name": "テストホースゴ", "jockey_code": "J005", "jockey_name": "テスト五郎", "kinryo_kg": 55.0, "ba_weight": 470, "score": 0.80}
       ]
+    },
+    {
+      "race_key": "TESTRACE0005",
+      "kaisai_date": "20260716",
+      "jyo_name": "函館",
+      "race_num": "10",
+      "distance": 1700,
+      "track_type": "芝",
+      "race_name": "テストマリーンステークス",
+      "horses": [
+        {"pred_rank": 1, "uma_num": 5, "waku_num": 5, "uma_code": "H0007", "uma_name": "テストナナ", "jockey_code": "J007", "jockey_name": "テスト七郎", "kinryo_kg": 55.0, "ba_weight": 480, "score": 0.50}
+      ]
+    },
+    {
+      "race_key": "TESTRACE0006",
+      "kaisai_date": "20260809",
+      "jyo_name": "札幌",
+      "race_num": "11",
+      "distance": 1000,
+      "track_type": "芝",
+      "race_name": "テストエルムステークス",
+      "horses": [
+        {"pred_rank": 1, "uma_num": 2, "waku_num": 2, "uma_code": "H0008", "uma_name": "テストナナ", "jockey_code": "J007", "jockey_name": "テスト七郎", "kinryo_kg": 56.0, "ba_weight": 482, "score": 0.60}
+      ]
     }
   ]
 }

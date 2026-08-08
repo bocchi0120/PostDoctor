@@ -56,11 +56,11 @@ def test_confirmed_race_keys(pcfg):
     assert "TESTRACE0004" not in confirmed
 
 
-def _match(pcfg, text):
+def _match(pcfg, text, created_at=None):
     rows = pd.load_all_predictions(pcfg)
     results = pd.load_race_results(pcfg)
     confirmed = pd.confirmed_race_keys(results)
-    return pd.find_match(text, rows, results, confirmed)
+    return pd.find_match(text, rows, results, confirmed, created_at=created_at)
 
 
 def test_find_match_by_horse_name_confirmed_race(pcfg):
@@ -189,6 +189,57 @@ def test_compute_predictions_signature_changes_when_rolling_file_updates(tmp_pat
     after = pd.compute_predictions_signature(pcfg)
 
     assert before != after
+
+
+# 同名馬が複数レースにまたがってヒットするケース(TESTRACE0005=テストマリーンステークス
+# 7/16・TESTRACE0006=テストエルムステークス8/9、どちらも「テストナナ」)。
+# 実例(2026-08-09): 「ウェイワードアクト」がマリーンS・エルムSの両方に出走登録されており、
+# マリーンSの予想投稿への下書きが、無関係な(開催日が新しいだけの)エルムSの事実文で
+# 生成された。この回帰テストで固定する。
+
+
+def test_find_match_disambiguates_by_race_name_when_multiple_races_match(pcfg):
+    """本文に一方のレース名が明記されていれば、開催日の新旧に関わらずそちらを選ぶ。"""
+    m, reason = _match(pcfg, "テストマリーンステークスのテストナナに注目")
+    assert m is not None
+    assert reason is None
+    assert m.horse.race_key == "TESTRACE0005"
+    assert "テストマリーンステークス" in m.fact_sentence
+
+
+def test_find_match_disambiguates_by_jyo_name_when_multiple_races_match(pcfg):
+    """レース名の明記が無くても、開催場名の共起で絞り込める。"""
+    m, reason = _match(pcfg, "函館のテストナナが気になる")
+    assert m is not None
+    assert m.horse.race_key == "TESTRACE0005"
+
+
+def test_find_match_real_incident_marine_s_not_overridden_by_newer_elm_s(pcfg):
+    """実例そのものの回帰テスト: マリーンSの話題の投稿が、開催日が新しいだけの
+    無関係なエルムSにすり替わらないこと。"""
+    m, reason = _match(
+        pcfg, "テストマリーンステークス、テストナナが強かったですね"
+    )
+    assert m is not None
+    assert reason is None
+    assert m.horse.race_key == "TESTRACE0005"
+    assert m.horse.race_key != "TESTRACE0006"
+
+
+def test_find_match_falls_back_to_created_at_proximity_without_race_hint(pcfg):
+    """本文にレース名/開催場名の手がかりが無い場合、投稿日時に開催日が近い方を選ぶ。"""
+    m, reason = _match(pcfg, "テストナナ、次も頑張ってほしい", created_at="2026-07-18T12:00:00+09:00")
+    assert m is not None
+    # 投稿日時(7/18)はTESTRACE0005(7/16)の方がTESTRACE0006(8/9)より近い
+    assert m.horse.race_key == "TESTRACE0005"
+
+
+def test_find_match_falls_back_to_latest_kaisai_date_without_any_hint(pcfg):
+    """本文の手がかりも投稿日時も無い場合のみ、開催日が最も新しいものを選ぶ
+    (従来の挙動。最終フォールバックとして維持)。"""
+    m, reason = _match(pcfg, "テストナナ、次も頑張ってほしい")
+    assert m is not None
+    assert m.horse.race_key == "TESTRACE0006"
 
 
 def test_fact_sentence_numbers_trace_to_fixture_data(pcfg):

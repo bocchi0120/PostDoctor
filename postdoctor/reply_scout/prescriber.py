@@ -168,7 +168,8 @@ def draft_top_candidates(account: Account, conn, cfg: ScoutConfig) -> int:
         if ranked.drafts:
             continue
         match, skip_reason = prediction_data.find_match(
-            ranked.candidate.text, predictions, results, confirmed
+            ranked.candidate.text, predictions, results, confirmed,
+            created_at=ranked.candidate.created_at,
         )
         if match is None:
             status = (

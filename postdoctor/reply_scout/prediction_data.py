@@ -21,6 +21,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 
 SNAPSHOT_RE = re.compile(r"predictions_(\d{8})\.json")
@@ -323,11 +324,66 @@ REASON_NO_MATCH = "no_match"
 REASON_TIME_MISMATCH = "time_mismatch"
 
 
+def _parse_kaisai_date(value: str) -> date | None:
+    try:
+        return datetime.strptime(value, "%Y%m%d").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_created_at_date(value: str) -> date | None:
+    try:
+        return datetime.fromisoformat(value).date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _select_candidate(
+    horse_candidates: list[HorseRow], candidate_text: str, created_at: str | None
+) -> HorseRow:
+    """同名馬が複数レースの予測データにまたがってヒットした場合に1件へ絞り込む。
+
+    実例: 「ウェイワードアクト」が7/16マリーンS・8/9エルムSの両方に出走登録されており、
+    本文が明らかにマリーンSの話をしている投稿に対し、単純に開催日が新しい方
+    （エルムS）を機械的に選んでしまい無関係な事実文を生成した（2026-08-09）。
+    以降は本文中の手がかりを優先し、開催日の新しさは最終フォールバックに格下げする。
+
+    1. 本文にレース名または開催場名が明記されているものがあれば、それに絞る。
+    2. 手がかりが無ければ、投稿日時（created_at）に開催日が最も近いものを選ぶ
+       （「新しいレースほど話題にされやすい」ではなく、「投稿時点に近いレースの方が
+       その投稿の指すレースである可能性が高い」という前提の方が実態に合うため）。
+    3. created_atが無い/パース不能な場合のみ、開催日が最も新しいものを選ぶ
+       （従来の挙動。手がかりが一切無いときの最終フォールバック）。
+    """
+    if len(horse_candidates) == 1:
+        return horse_candidates[0]
+
+    named = [
+        h
+        for h in horse_candidates
+        if (h.race_name and h.race_name in candidate_text)
+        or (h.jyo_name and h.jyo_name in candidate_text)
+    ]
+    pool = named if named else horse_candidates
+    if len(pool) == 1:
+        return pool[0]
+
+    post_date = _parse_created_at_date(created_at) if created_at else None
+    if post_date is not None:
+        dated = [(h, _parse_kaisai_date(h.kaisai_date)) for h in pool]
+        dated = [(h, d) for h, d in dated if d is not None]
+        if dated:
+            return min(dated, key=lambda pair: abs((pair[1] - post_date).days))[0]
+
+    return max(pool, key=lambda h: h.kaisai_date)
+
+
 def find_match(
     candidate_text: str,
     horses: list[HorseRow],
     results: dict[str, dict[str, dict]],
     confirmed: set[str],
+    created_at: str | None = None,
 ) -> tuple[PredictionMatch | None, str | None]:
     """candidate_textに実在の馬名が含まれるかを調べ、あれば事実文を確定させる。
 
@@ -340,7 +396,8 @@ def find_match(
 
     1. 既知の馬名（2文字以上）が本文に部分一致するものを探す。3文字以下の
        短い馬名は誤マッチしやすいため、レース名または開催場名との共起も必須とする。
-       複数該当する場合は開催日が新しいものを優先する。
+       同名馬が複数レースにまたがってヒットした場合は _select_candidate() で
+       本文のレース名/開催場名 → 投稿日時への近さ → 開催日の新しさ、の順に絞り込む。
     2. 一致する馬名が無ければ (None, REASON_NO_MATCH)（下書き生成をハードスキップ
        する合図）。
     3. 一致したレースが確定済みで、かつ投稿がレース前フレーミング（「前哨戦分析」
@@ -355,7 +412,7 @@ def find_match(
     ]
     if not horse_candidates:
         return None, REASON_NO_MATCH
-    chosen = max(horse_candidates, key=lambda h: h.kaisai_date)
+    chosen = _select_candidate(horse_candidates, candidate_text, created_at)
 
     mark = mark_for_score(chosen.score)
     concluded = chosen.race_key in confirmed
