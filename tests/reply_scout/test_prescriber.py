@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from postdoctor.reply_scout import db, prediction_data, prescriber
 from postdoctor.reply_scout.db import Candidate
 from postdoctor.reply_scout.fetcher import ScoutConfig
@@ -237,3 +239,84 @@ def test_draft_top_candidates_excludes_skipped_status(monkeypatch, conn):
     count = prescriber.draft_top_candidates(account=None, conn=conn, cfg=cfg)
     assert count == 0
     assert calls["n"] == 0
+
+
+# --- 相手の予想との一致・不一致の主張（2026-09-29、候補#7 @naanaashii_1 の実例） ---
+
+CANDIDATE7_REACTION = "札幌記念、グランディア軸ですね。自分も近い見立てでした"
+
+
+def test_system_prompt_forbids_agreement_claims():
+    """反応文を書くClaudeは相手の印とRakubaの印を比較していないので、一致・不一致を
+    主張する表現を禁じる制約がシステムプロンプトに明記されていること。"""
+    assert "一致・不一致を主張する表現は一切書かない" in prescriber.SYSTEM_PROMPT
+    assert "自分も近い見立てでした" in prescriber.SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize(
+    "reaction",
+    [
+        CANDIDATE7_REACTION,  # 候補#7の案1そのもの
+        "グランディア本命、こちらと同じです",
+        "うちも似た評価でした",
+        "自分も高く見てたので今回は完全に見立て違いでした",  # 過去の下書きの実例
+        "こちらも本命にしていました",
+        "近い見立てで嬉しいです",
+        "同じ評価の方がいて心強いです",
+        "見立てが一致しましたね",
+        "本命が被りました",
+        "こちらとは見立てが違いますが参考になります",
+        "こちらの見立てとは違う結果で勉強になります",  # 過去の下書きの実例
+        "大外回しが響いたという見立て納得です",  # 過去の下書きの実例
+        "納得の本命ですね",
+        "同感です",
+    ],
+)
+def test_agreement_claim_re_detects_claims(reaction):
+    assert prescriber.AGREEMENT_CLAIM_RE.search(reaction), reaction
+
+
+@pytest.mark.parametrize(
+    "reaction",
+    [
+        # 過去の下書きに実際にあった、比較を主張していない反応文（誤検知しないこと）
+        "先行してからの持続力が持ち味というのは納得感あります。毎日王冠との相性の良さも興味深いです",
+        "イガッチの適性の広さ、こちらも気になってました",
+        "マイネルメモリーの訃報、自分も驚きました",
+        "アイビスまで並べての総括、お疲れさまです。夏場は荒れやすくて自分も苦戦しました",
+        "函館と小倉でコース質が違うというのは見落としがちな視点、参考になります",
+        "洋芝適性の見立て、参考になります",
+        "騎手それぞれの思い入れの馬が違うの、ドラマがあって好きです",
+    ],
+)
+def test_agreement_claim_re_allows_plain_reactions(reaction):
+    assert not prescriber.AGREEMENT_CLAIM_RE.search(reaction), reaction
+
+
+def test_generate_drafts_discards_candidate7_agreement_claim_and_retries(monkeypatch):
+    """候補#7の案1が返ってきても下書きに残らず、再試行で補充されること。"""
+    match = _find_match("テストホースイチが強かった")
+    assert match is not None
+    calls = {"n": 0}
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _FakeResponse(
+                    '{"reactions": ["' + CANDIDATE7_REACTION + '", "いい馬ですよね"]}'
+                )
+            return _FakeResponse('{"reactions": ["気になる存在です"]}')
+
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr(prescriber, "_client", lambda: _FakeClient())
+    candidate = _candidate("c7", "札幌記念はグランディア軸で勝負")
+    drafts = prescriber.generate_drafts(candidate, match, model="claude-sonnet-5")
+
+    assert calls["n"] == 2
+    assert len(drafts) == 2
+    for d in drafts:
+        assert "近い見立て" not in d
+        assert not prescriber.AGREEMENT_CLAIM_RE.search(d.replace(match.fact_sentence, ""))

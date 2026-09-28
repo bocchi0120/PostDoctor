@@ -162,6 +162,21 @@
     `test_find_match_short_name_rejected_when_race_name_blank`、
     `test_find_match_short_name_with_sponsored_race_name`、`test_find_match_short_name_uses_core_race_name`。
 
+13. **反応文が相手の予想との一致・不一致を主張する（2026-09-29発覚）**: 候補#7
+    (@naanaashii_1)の案1が「札幌記念、グランディア軸ですね。自分も近い見立てでした」
+    だった。反応文を書くClaudeにはRakubaの予測内容を渡していない（捏造防止のため事実は
+    fact_sentenceに分離している）ので、相手の印とRakubaの印を比較しようがなく、この種の
+    主張は根拠の無い捏造になる。過去の下書き(ユニーク301件)にも「自分も高く見てたので」
+    「こちらの見立てとは違う結果」「という見立て納得です」等が計5件あった。
+    → 修正(`prescriber.py`): (a) SYSTEM_PROMPTに一致・不一致の主張を禁じる【厳守】制約を
+    追加（#7の文面を例示）。(b) NUMERIC_MARK_REと同じ多重防御として`AGREEMENT_CLAIM_RE`を
+    追加し、該当した案は`_call_claude()`で破棄（再試行1回→プレースホルダ）。正規表現は
+    過去の反応文301件で較正し、主張を含む5件のみ一致・「納得感あります」「こちらも
+    気になってました」等の無害な表現は非一致を確認。
+    回帰テスト(`tests/reply_scout/test_prescriber.py`): `test_system_prompt_forbids_agreement_claims`、
+    `test_agreement_claim_re_detects_claims`、`test_agreement_claim_re_allows_plain_reactions`、
+    `test_generate_drafts_discards_candidate7_agreement_claim_and_retries`。
+
 ## 5. スコアリング・候補選定の判断
 
 - NGワードは2リスト: 煽り系（スコア半減）と勧誘・宣伝系「限定/有料/教える等」（ハード除外）。
@@ -263,6 +278,10 @@
 ## 10. 今後の改善バックログ（会話中に挙がった未実装・検討事項）
 
 - published版スナップショット凍結（4-5節）— 最優先
+- 反応文が「自分の見立ても甘かった」「見立てが外れました」のように、Rakuba自身の予想の
+  当否を語る表現（4節13項の対象外）。トーン指示でカテゴリ(外れ等)は伝えているので
+  方向は概ね合うが、Claudeは実際の評価を知らないため、fact_sentenceと食い違う余地は残る。
+  実例が出たら同様の禁止対象に加えるか検討。
 - 一般名詞と一致する短い馬名のリスト（「サイン」等をconfigに列挙し、さらに厳しい条件を
   課す案）— 2026-09-28見送り（4節12項）。A+B適用後に残る誤マッチは「テスト北斗特別の
   サイン馬券」のように、そのレース名/レース番号と一般名詞が同じ投稿に並ぶ場合のみで、

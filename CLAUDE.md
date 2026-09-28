@@ -119,13 +119,17 @@ citing Rakuba's pick when the poster was talking about their own pick for the sa
 `prescriber.draft_top_candidates()` skips any candidate that already has a `drafts` row — it does
 not know whether the existing draft reflects current logic. **After any change to
 `prediction_data.py`, `prescriber.py`, or `analyzer.py`'s scoring/filtering, existing `drafts` rows
-are stale and must be cleared and regenerated**, or old (possibly wrong) drafts survive silently:
+are stale and must be cleared and regenerated**, or old (possibly wrong) drafts survive silently.
+Clear only drafts for still-unsent candidates (`status='未送信'`) — drafts of `送信済み`/`見送り`
+candidates are the record of what was sent or skipped, and a blanket `DELETE FROM drafts` wipes them
+(their cards then show a misleading "下書き未生成" prompt; happened 2026-09-29):
 
 ```powershell
 # back up first — data/backup/<timestamp>/ is gitignored, so this step is manual
 Copy-Item data/<account>/reply_scout.db data/backup/<timestamp>/reply_scout.db
 # then, against data/<account>/reply_scout.db:
-DELETE FROM drafts;
+DELETE FROM drafts WHERE candidate_id IN
+  (SELECT id FROM candidates WHERE status='未送信');
 ```
 Then re-run `reply-scout draft` (or `run`, which also re-scores). Note `reply-scout draft`/`run`
 do not call `generate_dashboard()` — run `python main.py dashboard --account <name>` afterward (or
