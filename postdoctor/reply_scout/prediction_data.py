@@ -56,6 +56,10 @@ class HorseRow:
     uma_code: str
     uma_name: str
     score: float
+    # 出走頭数。uma_num>0(馬番確定)の行だけを数える。レース内に1頭でもuma_num==0
+    # (枠順未確定のプレースホルダ)が混ざっていれば頭数を確定できないのでNone
+    # (確定済みの馬だけ数えると実際より少ない頭数を断定してしまうため)。
+    field_size: int | None = None
 
 
 def _race_label(horse: HorseRow) -> str:
@@ -67,9 +71,18 @@ def _race_label(horse: HorseRow) -> str:
     return f"{base} {horse.race_name}" if horse.race_name else base
 
 
+def _field_size(horses: list[dict]) -> int | None:
+    uma_nums = [int(h.get("uma_num") or 0) for h in horses]
+    if not uma_nums or any(n == 0 for n in uma_nums):
+        return None
+    return len(uma_nums)
+
+
 def _horses_from_race(race: dict) -> list[HorseRow]:
     rows = []
-    for h in race.get("horses", []):
+    horses = race.get("horses", [])
+    field_size = _field_size(horses)
+    for h in horses:
         rows.append(
             HorseRow(
                 race_key=str(race.get("race_key", "")),
@@ -83,6 +96,7 @@ def _horses_from_race(race: dict) -> list[HorseRow]:
                 uma_code=str(h.get("uma_code", "")),
                 uma_name=str(h.get("uma_name", "")),
                 score=float(h.get("score") or 0.0),
+                field_size=field_size,
             )
         )
     return rows
@@ -228,7 +242,7 @@ CATEGORY_MISS_HIGH = "見込み違い系"  # 高評価 だが 凡走
 CATEGORY_MISS_LOW = "完敗系"        # 低評価 だが 好走（評価を覆された）
 CATEGORY_AS_EXPECTED = "順当系"     # 低評価 かつ 凡走（評価通り）
 
-HIGH_EVAL_SCORE_THRESHOLD = 0.3  # mark_for_score()の〇/△境界と揃える
+HIGH_EVAL_MAX_PRED_RANK = 3     # 3番手評価以内を「高評価」とみなす
 GOOD_RESULT_MAX_CHAKUJUN = 3     # 3着以内を「好走」とみなす
 
 
@@ -243,8 +257,11 @@ class PredictionMatch:
     category: str | None  # 的中系/見込み違い系/完敗系/順当系、除外・未確定時はNone
 
 
-def _classify(score: float, chakujun: int) -> str:
-    high_eval = score >= HIGH_EVAL_SCORE_THRESHOLD
+def _classify(pred_rank: int, chakujun: int) -> str:
+    # 高評価/低評価は事実文に出す「N番手評価」と同じ基準(レース内順位)で判定する。
+    # 以前はscore閾値で判定しており、スコアの低い本命が2着だと「評価を大きく
+    # 上回りました」になる矛盾があった(docs/design_decisions.md 4節11項)。
+    high_eval = 1 <= pred_rank <= HIGH_EVAL_MAX_PRED_RANK
     good_result = 1 <= chakujun <= GOOD_RESULT_MAX_CHAKUJUN
     if high_eval and good_result:
         return CATEGORY_HIT
@@ -260,26 +277,64 @@ def _build_fact_sentence(
 ) -> tuple[str, str | None]:
     """fact_sentenceと、Claudeへのトーン指示に使うcategoryを返す。
 
-    数値・マーク・着順は全て実データそのまま（外れの引用も隠さない）。
-    テンプレート文言だけがカテゴリごとに異なる。
+    順位・頭数・マーク・着順は全て実データそのまま（外れの引用も隠さない）。
+    テンプレート文言だけがカテゴリごとに異なる。生スコア(0.25等)は受け手に
+    意味が伝わらない内部値なので文面には出さない(_classify()の判定にも使わない)。
+
+    AI判定(◎◎/◎/〇/△/×, mark_for_score())と、馬個体の相対評価(pred_rank=
+    出走馬内でのN番手)は別概念であり、混同しない（Rakuba ops/x_post.pyの
+    MARK_NOTE「AI判定は◎(本命)自体の自信度」の通り、AI判定はそのレースの
+    本命馬1頭のスコアだけから決まるレース単位の指標で、2番手以下の馬には
+    そもそも定義されない。以前、find_match()が対象馬がどのpred_rankであっても
+    一律mark_for_score(その馬自身のscore)を「◎評価」のように個体評価として
+    文面化しており、例えば2番手評価の馬を「△評価」と書いてしまうなど、
+    「AI判定」と「その馬の順位評価」を混同した実例があった。詳細は
+    docs/design_decisions.md参照）。
+
+    - pred_rank==1(本命/◎馬): 「本命(1番手評価)」と表記し、そのレースの
+      AI判定(=本命自体の自信度)を別文で添える。
+    - pred_rank>=2(◎以外): 「N番手評価」とだけ表記する。AI判定マークは
+      本命にしか紐づかない概念なので、ここでは一切使わない。
+    - 頭数が確定できる場合は「18頭中3番手評価」のように頭数を添える
+      (HorseRow.field_size参照。確定できなければ「3番手評価」のみ)。
     """
     label = _race_label(horse)
-    prefix = f"うちのAIモデルは{label}で『{horse.uma_name}』を{mark}評価(スコア{horse.score:.2f})"
+    field = (
+        f"{horse.field_size}頭中"
+        if horse.field_size and horse.pred_rank <= horse.field_size
+        else ""
+    )
+    if horse.pred_rank == 1:
+        core = f"本命({field}1番手評価)"
+    elif horse.pred_rank >= 2:
+        core = f"{field}{horse.pred_rank}番手評価"
+    else:
+        # pred_rankが未設定/0などの異常値(本来のRakuba出力では発生しない想定)。
+        # 順位を断定表示できないので、旧来通りAI判定マークをそのまま流用する
+        # フォールバックに留める。
+        core = f"{mark}評価"
+    prefix = f"うちのAIモデルは{label}で『{horse.uma_name}』を{core}"
 
     if chakujun is None:
-        return prefix + "としています。", None
-    if chakujun == 0:
-        return prefix + "としていました(結果除外)。", None
+        sentence, category = prefix + "としています。", None
+    elif chakujun == 0:
+        sentence, category = prefix + "としていました(結果除外)。", None
+    else:
+        category = _classify(horse.pred_rank, chakujun)
+        if category == CATEGORY_HIT:
+            sentence = prefix + f"としていて、実際に{chakujun}着と好走しました。"
+        elif category == CATEGORY_MISS_HIGH:
+            sentence = prefix + f"としていましたが、結果は{chakujun}着にとどまりました。"
+        elif category == CATEGORY_MISS_LOW:
+            sentence = prefix + f"としていましたが、結果は{chakujun}着と、評価を大きく上回りました。"
+        else:  # CATEGORY_AS_EXPECTED
+            sentence = prefix + f"としていて、結果も{chakujun}着と評価通りでした。"
 
-    category = _classify(horse.score, chakujun)
-    if category == CATEGORY_HIT:
-        sentence = prefix + f"としていて、実際に{chakujun}着と好走しました。"
-    elif category == CATEGORY_MISS_HIGH:
-        sentence = prefix + f"と評価していましたが、結果は{chakujun}着にとどまりました。"
-    elif category == CATEGORY_MISS_LOW:
-        sentence = prefix + f"としていましたが、結果は{chakujun}着と、評価を大きく上回りました。"
-    else:  # CATEGORY_AS_EXPECTED
-        sentence = prefix + f"としていて、結果も{chakujun}着と評価通りでした。"
+    if horse.pred_rank == 1:
+        # AI判定は本命自体の自信度というレース単位の情報なので、個体評価の文とは
+        # 分けて別文で添える(混同防止)。
+        sentence += f"(このレースのAI判定は{mark})"
+
     return sentence, category
 
 

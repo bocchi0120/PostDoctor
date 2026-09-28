@@ -1,6 +1,6 @@
 {
   "generated_at": "2026-07-21T00:00:00",
-  "n_races": 4,
+  "n_races": 8,
   "races": [
     {
       "race_key": "TESTRACE0001",
@@ -74,6 +74,32 @@
       "race_name": "テストエルムステークス",
       "horses": [
         {"pred_rank": 1, "uma_num": 2, "waku_num": 2, "uma_code": "H0008", "uma_name": "テストナナ", "jockey_code": "J007", "jockey_name": "テスト七郎", "kinryo_kg": 56.0, "ba_weight": 482, "score": 0.60}
+      ]
+    },
+    {
+      "race_key": "TESTRACE0007",
+      "kaisai_date": "20260712",
+      "jyo_name": "小倉",
+      "race_num": "11",
+      "distance": 2000,
+      "track_type": "芝",
+      "race_name": "テスト小倉記念",
+      "horses": [
+        {"pred_rank": 1, "uma_num": 4, "waku_num": 2, "uma_code": "H0009", "uma_name": "テストホースキュウ", "jockey_code": "J009", "jockey_name": "テスト九郎", "kinryo_kg": 56.0, "ba_weight": 470, "score": 0.25},
+        {"pred_rank": 2, "uma_num": 1, "waku_num": 1, "uma_code": "H0010", "uma_name": "テストホースジュウ", "jockey_code": "J010", "jockey_name": "テスト十郎", "kinryo_kg": 55.0, "ba_weight": 466, "score": 0.10}
+      ]
+    },
+    {
+      "race_key": "TESTRACE0008",
+      "kaisai_date": "20260830",
+      "jyo_name": "新潟",
+      "race_num": "10",
+      "distance": 1400,
+      "track_type": "ダート",
+      "race_name": "テスト混在ステークス",
+      "horses": [
+        {"pred_rank": 1, "uma_num": 3, "waku_num": 3, "uma_code": "H0011", "uma_name": "テストホースジュウイチ", "jockey_code": "J011", "jockey_name": "テスト十一郎", "kinryo_kg": 57.0, "ba_weight": 500, "score": 0.70},
+        {"pred_rank": 2, "uma_num": 0, "waku_num": 0, "uma_code": "H0012", "uma_name": "テストホースジュウニ", "jockey_code": "J012", "jockey_name": "テスト十二郎", "kinryo_kg": 55.0, "ba_weight": 480, "score": 0.40}
       ]
     }
   ]

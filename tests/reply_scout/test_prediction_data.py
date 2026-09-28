@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from postdoctor.reply_scout import prediction_data as pd
 
 
@@ -72,7 +74,7 @@ def test_find_match_by_horse_name_confirmed_race(pcfg):
     assert m.chakujun == 2
     assert m.mark == "◎◎"
     assert "2着" in m.fact_sentence
-    assert "0.95" in m.fact_sentence
+    assert "1番手評価" in m.fact_sentence
 
 
 def test_find_match_race_name_only_no_longer_matches(pcfg):
@@ -167,6 +169,91 @@ def test_find_match_category_miss_high_when_high_eval_and_bad_result(pcfg):
     assert "5着" in m.fact_sentence
 
 
+def test_fact_sentence_honmei_gets_rank_label_and_separate_ai_judgement(pcfg):
+    """pred_rank=1(本命)は「本命(1番手評価)」と表記し、AI判定(◎◎等)は
+    レース単位の情報として別文で添える。「◎◎評価」のように個体評価と
+    地続きの文面にはしない(AI判定と個体の順位評価の混同を避けるため)。"""
+    m, reason = _match(pcfg, "テストホースイチが強かった")
+    assert m is not None
+    assert "本命(3頭中1番手評価)" in m.fact_sentence
+    assert "このレースのAI判定は◎◎" in m.fact_sentence
+
+
+def test_fact_sentence_non_honmei_uses_rank_only_no_ai_judgement_mark(pcfg):
+    """pred_rank>=2の馬は「N番手評価」とだけ表記し、AI判定マーク(◎◎/◎/〇/△/×)は
+    一切使わない(AI判定は本命自体の自信度であり、2番手以下には定義されない概念のため)。"""
+    m, reason = _match(pcfg, "テストホースニに注目していました")
+    assert m is not None
+    assert "2番手評価" in m.fact_sentence
+    assert "AI判定" not in m.fact_sentence
+    for sym in ["◎◎", "◎", "〇", "△", "×"]:
+        assert f"を{sym}" not in m.fact_sentence
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "テストホースイチが強かった",  # 本命・確定済み(的中系)
+        "テストホースニに注目していました",  # 2番手・確定済み(見込み違い系)
+        "テストホースゴに期待しています",  # 未確定・頭数不明
+        "テストホースキュウは惜しかった",  # 低スコアの本命・2着
+    ],
+)
+def test_fact_sentence_never_contains_raw_score(pcfg, text):
+    """生スコア(0.25, -1.54等)は受け手に意味が伝わらない内部値なので、
+    事実文には一切出さない(順位表記のみ)。"""
+    m, reason = _match(pcfg, text)
+    assert m is not None
+    assert "スコア" not in m.fact_sentence
+    assert f"{m.horse.score:.2f}" not in m.fact_sentence
+
+
+def test_classify_uses_pred_rank_not_score():
+    assert pd._classify(1, 2) == pd.CATEGORY_HIT
+    assert pd._classify(3, 3) == pd.CATEGORY_HIT
+    assert pd._classify(3, 4) == pd.CATEGORY_MISS_HIGH
+    assert pd._classify(4, 1) == pd.CATEGORY_MISS_LOW
+    assert pd._classify(4, 10) == pd.CATEGORY_AS_EXPECTED
+
+
+def test_low_score_honmei_placing_2nd_is_not_outperformed(pcfg):
+    """ジョバンニ(小倉記念)の実例の回帰テスト: スコアが低い(0.25)本命でも、
+    2着なら「評価を大きく上回りました」とは書かない。高評価/低評価は
+    score閾値ではなく順位(pred_rank<=3)で判定する。"""
+    m, reason = _match(pcfg, "テストホースキュウは惜しかった")
+    assert m is not None
+    assert m.horse.pred_rank == 1
+    assert m.chakujun == 2
+    assert m.category == pd.CATEGORY_HIT
+    assert "大きく上回" not in m.fact_sentence
+
+
+def test_fact_sentence_includes_field_size_when_all_uma_num_confirmed(pcfg):
+    m, _ = _match(pcfg, "テストホースイチが強かった")
+    assert "本命(3頭中1番手評価)" in m.fact_sentence
+    m, _ = _match(pcfg, "テストホースニに注目していました")
+    assert "3頭中2番手評価" in m.fact_sentence
+
+
+def test_fact_sentence_omits_field_size_when_placeholder_rows_present(pcfg):
+    """uma_num==0(枠順未確定)の行を含むレースは頭数を確定できないので
+    「N番手評価」のみ。確定済みの馬だけ数えると実際より少ない頭数を
+    断定してしまうため、混在レースも頭数なし扱い。"""
+    m, _ = _match(pcfg, "テストホースゴに期待しています")  # 全頭uma_num==0
+    assert "本命(1番手評価)" in m.fact_sentence
+    assert "頭中" not in m.fact_sentence
+    m, _ = _match(pcfg, "テストホースジュウイチに期待")  # 確定/未確定の混在
+    assert "本命(1番手評価)" in m.fact_sentence
+    assert "頭中" not in m.fact_sentence
+
+
+def test_field_size_counts_only_confirmed_uma_num():
+    assert pd._field_size([{"uma_num": 1}, {"uma_num": 2}, {"uma_num": "3"}]) == 3
+    assert pd._field_size([{"uma_num": 1}, {"uma_num": 0}]) is None
+    assert pd._field_size([{"uma_num": 0}]) is None
+    assert pd._field_size([]) is None
+
+
 def test_compute_predictions_signature_none_when_dir_missing(tmp_path):
     pcfg = pd.load_prediction_config(str(tmp_path / "does_not_exist"))
     assert pd.compute_predictions_signature(pcfg) is None
@@ -247,6 +334,6 @@ def test_fact_sentence_numbers_trace_to_fixture_data(pcfg):
     （捏造防止の直接的な回帰テスト）。"""
     m, reason = _match(pcfg, "テストホースイチが強かった")
     assert m is not None
-    expected_score_str = f"{m.horse.score:.2f}"
-    assert expected_score_str in m.fact_sentence
+    # 生スコアは事実文に出さない方針のため、順位・頭数・着順の3つを突き合わせる
+    assert f"{m.horse.field_size}頭中{m.horse.pred_rank}番手評価" in m.fact_sentence
     assert str(m.chakujun) in m.fact_sentence

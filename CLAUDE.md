@@ -8,6 +8,8 @@ backend), see `C:\Projects\CLAUDE.md` — that file covers the data contract for
 
 Before any large design change, consult `docs/design_decisions.md` for the rationale behind past decisions.
 
+ユーザーへの報告・応答は常に日本語で行うこと(コード自体のコメントや変数名は従来通り英語で問題ない)。
+
 ## What this is
 
 PostDoctor analyzes how an X (Twitter) account's own posts perform (`fetch`/`analyze`/`prescribe`/
