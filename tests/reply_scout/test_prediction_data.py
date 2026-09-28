@@ -100,17 +100,102 @@ def test_find_match_short_name_without_context_is_rejected(pcfg):
     assert reason == pd.REASON_NO_MATCH
 
 
-def test_find_match_short_name_with_context_is_accepted(pcfg):
-    m, reason = _match(pcfg, "中山でアオが出走するらしい")
+def test_find_match_short_name_rejected_when_race_name_blank(pcfg):
+    """race_nameが空欄のレース(TESTRACE0003=中山9R)の短い馬名は、開催場名や
+    開催場名+レース番号があっても一致させない(文脈条件を満たせないので安全側)。"""
+    for text in ["中山でアオが出走するらしい", "中山9Rでアオが出走するらしい"]:
+        m, reason = _match(pcfg, text)
+        assert m is None, text
+        assert reason == pd.REASON_NO_MATCH
+
+
+def test_find_match_short_name_accepted_with_race_name(pcfg):
+    m, reason = _match(pcfg, "テスト函館特別はジオが本命")
     assert m is not None
-    assert reason is None
-    assert m.horse.uma_code == "H0004"
-    # TESTRACE0003はchakujun>0の行が無い(全頭除外)ため未確定扱いになる
-    # （個別馬の除外表示自体は test_find_match_individual_exclusion_within_confirmed_race
-    # で別途検証する）。
-    assert m.concluded is False
-    assert m.chakujun is None
-    assert "除外" not in m.fact_sentence
+    assert m.horse.uma_code == "H0015"
+
+
+@pytest.mark.parametrize(
+    "text", ["函館10Rはジオ", "函館 10R ジオ", "函館10Ｒのジオ", "函館10レースのジオ"]
+)
+def test_find_match_short_name_accepted_with_venue_and_race_number(pcfg, text):
+    """開催場名+レース番号はレースを特定できるので文脈条件を満たす(表記ゆれ込み)。"""
+    m, reason = _match(pcfg, text)
+    assert m is not None, text
+    assert m.horse.uma_code == "H0015"
+
+
+def test_find_match_short_name_rejected_with_venue_only(pcfg):
+    """開催場名だけではレースを特定できない(「函館記念」の「函館」等)。"""
+    m, reason = _match(pcfg, "函館記念の日にジオを見た")
+    assert m is None
+    # レース番号違いも不可
+    m, reason = _match(pcfg, "函館11Rのジオ")
+    assert m is None
+
+
+def test_find_match_short_name_uses_core_race_name():
+    """「農林水産省賞典　小倉記念」のような冠名付き正式名称でも、投稿側の通称で一致させる。"""
+    assert pd._core_race_name("農林水産省賞典　小倉記念") == "小倉記念"
+    assert pd._core_race_name("関屋記念") == "関屋記念"
+    assert pd._core_race_name("") == ""
+
+
+def test_find_match_short_name_with_sponsored_race_name(pcfg):
+    m, reason = _match(pcfg, "テスト小倉杯はエヒで決まり")
+    assert m is not None
+    assert m.horse.uma_code == "H0017"
+
+
+def test_find_match_radio_does_not_match_jio(pcfg):
+    """「ジオ」が「ラジオNIKKEI」の一部に一致しない(文脈条件は満たしていても)。"""
+    m, reason = _match(pcfg, "テスト函館特別はラジオNIKKEIで観戦")
+    assert m is None
+
+
+def test_find_match_cranford_does_not_match_kuran(pcfg):
+    """短い馬名「クラン」が、別馬名「クランフォード」の一部に一致しない。"""
+    m, reason = _match(pcfg, "テスト函館特別 S評価 クランフォード")
+    assert m is None
+
+
+def test_name_at_word_boundary():
+    assert pd._name_at_word_boundary("ジオ", "ジオ、強い") is True
+    assert pd._name_at_word_boundary("ジオ", "ラジオNIKKEI") is False
+    assert pd._name_at_word_boundary("クラン", "クランフォード") is False
+    assert pd._name_at_word_boundary("クラン", "クランー") is False  # 長音
+    assert pd._name_at_word_boundary("ライカ", "ディクタストライカ/ウマ娘") is False
+    assert pd._name_at_word_boundary("ジオ", "ｼﾞｵ") is False  # 半角は別表記なので不一致
+    assert pd._name_at_word_boundary("ジオ", "ﾗジオ") is False  # 直前が半角カナ
+    # 一度でも境界上に現れればTrue
+    assert pd._name_at_word_boundary("ジオ", "ラジオとジオ") is True
+
+
+def test_find_match_candidate9_common_noun_short_name_loses_to_long_name(pcfg):
+    """候補#9(@simazaemonyo)の構図の回帰テスト: 「函館記念」の「函館」だけを
+    文脈として、一般名詞「サイン」が函館9Rの馬『サイン』に誤マッチし、本文の
+    話題である長い馬名の馬より優先されていた。"""
+    text = "換金しなくてよかった！函館記念テストラーゼン応援馬券にやっとサインもらえたよー！"
+    m, reason = _match(pcfg, text, created_at="2026-08-30T17:30:12+09:00")
+    assert m is not None
+    assert m.horse.uma_name == "テストラーゼン"
+
+
+def test_find_match_common_noun_short_name_alone_not_matched(pcfg):
+    """長い馬名が無くても、開催場名だけでは『サイン』に一致しない。"""
+    m, reason = _match(pcfg, "函館記念の馬券にサインもらえた", created_at="2026-08-30T17:30:12+09:00")
+    assert m is None
+    # レースを特定できる手がかりがあれば一致する(馬名自体を禁止しているわけではない)
+    m, reason = _match(pcfg, "テスト北斗特別はサインが勝った")
+    assert m is not None
+    assert m.horse.uma_code == "H0014"
+
+
+def test_find_match_long_name_preferred_over_short_name(pcfg):
+    """長い馬名と短い馬名の両方が一致したら、文脈が揃っていても長い方を採用する。"""
+    m, reason = _match(pcfg, "テスト北斗特別のサインより、テストラーゼンが気になる")
+    assert m is not None
+    assert m.horse.uma_name == "テストラーゼン"
 
 
 def test_find_match_unconfirmed_race_omits_result_clause(pcfg):

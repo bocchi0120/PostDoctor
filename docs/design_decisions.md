@@ -130,6 +130,38 @@
     `test_fact_sentence_omits_field_size_when_placeholder_rows_present`(TESTRACE0008)、
     `test_field_size_counts_only_confirmed_uma_num`。
 
+12. **短い馬名の一般名詞・部分文字列への誤マッチ（2026-09-28発覚）**: 候補#9
+    (@simazaemonyo)「函館記念ファウストラーゼン応援馬券に…サインもらえた」が、函館9R
+    北斗特別の馬『サイン』に誤マッチした。「サイン」は3文字なので短い馬名対策の対象
+    だったが、原因は3つ重なっていた。(1) 短い馬名の文脈条件が「レース名**または開催場名**」
+    で、「函館記念」の中の「函館」だけで満たされた。(2) 本文の話題である長い馬名
+    『ファウストラーゼン』にも一致していたが、`_select_candidate()`(同名馬の別レース判別用)
+    が一致の強さを見ずに開催日の近さで『サイン』を選んだ。(3) 馬名を単純な部分文字列で
+    照合しており、保存済み候補の短い馬名一致(延べ約40件)の大半が「ジオ」⊂「ラジオNIKKEI」、
+    「クラン」⊂「クランフォード」、「ライカ」⊂「ディクタストライカ」等の誤マッチだった。
+    → 修正(`prediction_data.py`):
+    A. 全馬名で、一致部分の前後がカタカナ(長音・半角カナ含む)なら不一致
+       (`_name_at_word_boundary()`)。
+    B. 短い馬名(3文字以下)の文脈条件を、レース名(冠名を除いた通称、`_core_race_name()`)
+       または開催場名+レース番号(「函館9R」「函館 9R」「函館9Ｒ」「函館9レース」)に強化。
+       開催場名だけでは不可。**race_nameが空欄のレースでは短い馬名を一致させない**
+       (文脈条件を満たせないため安全側。`_race_specific_context()`)。
+    C. 長い馬名の一致がある場合は短い馬名の一致を候補から外してから`_select_candidate()`へ
+       (`find_match()`内)。
+    実データ(保存済み全候補)で再判定すると、短い馬名の一致は本物6件(エヒト/小倉記念、
+    ジュタ/関屋記念)のみ残り、誤マッチは全て消えた。代償として、race_name空欄の函館記念
+    (6/28)に出たジュタについて「函館 11R 函館記念 ジュタ」と書いた本物の投稿2件も一致しなく
+    なった（race_name空欄は一律不一致とする方針による、受け入れ済みのトレードオフ）。
+    回帰テスト(`tests/reply_scout/test_prediction_data.py`):
+    `test_find_match_candidate9_common_noun_short_name_loses_to_long_name`、
+    `test_find_match_common_noun_short_name_alone_not_matched`、
+    `test_find_match_long_name_preferred_over_short_name`、
+    `test_find_match_radio_does_not_match_jio`、`test_find_match_cranford_does_not_match_kuran`、
+    `test_name_at_word_boundary`、`test_find_match_short_name_accepted_with_venue_and_race_number`
+    (表記ゆれ4種)、`test_find_match_short_name_rejected_with_venue_only`、
+    `test_find_match_short_name_rejected_when_race_name_blank`、
+    `test_find_match_short_name_with_sponsored_race_name`、`test_find_match_short_name_uses_core_race_name`。
+
 ## 5. スコアリング・候補選定の判断
 
 - NGワードは2リスト: 煽り系（スコア半減）と勧誘・宣伝系「限定/有料/教える等」（ハード除外）。
@@ -231,6 +263,15 @@
 ## 10. 今後の改善バックログ（会話中に挙がった未実装・検討事項）
 
 - published版スナップショット凍結（4-5節）— 最優先
+- 一般名詞と一致する短い馬名のリスト（「サイン」等をconfigに列挙し、さらに厳しい条件を
+  課す案）— 2026-09-28見送り（4節12項）。A+B適用後に残る誤マッチは「テスト北斗特別の
+  サイン馬券」のように、そのレース名/レース番号と一般名詞が同じ投稿に並ぶ場合のみで、
+  実例は未確認。`trusted_authors`と同じく実例が出てから追加する。
+- analyzer側の馬名照合（`_specificity()`/`_topic_key()`/`_has_analytical_signal()`）も
+  単純な部分文字列一致のまま（「ジオ」⊂「ラジオ」等で加点・重複排除が誤作動し得る）。
+  事実文には影響しないが、`_name_at_word_boundary()`の流用を検討。
+- Rakuba側データで重賞のrace_nameが空欄のレースがある（例: 2026-06-28函館11R 函館記念）。
+  4節12項の方針で、ここに出た短い馬名は一致しない。Rakuba側でrace_nameが埋まれば解消。
 - 事実文の「マーク+順位」化（5節）の残課題（本体は2026-09-28に実現、4節11項）:
   - 高評価の閾値`HIGH_EVAL_MAX_PRED_RANK=3`は頭数によらず固定（6頭立ての3番手と
     18頭立ての3番手を同じ扱い）。スコアカードの実測を見て頭数比例等を検討。

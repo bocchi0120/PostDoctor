@@ -353,23 +353,74 @@ def _is_pre_race_framing(text: str) -> bool:
 
 SHORT_NAME_THRESHOLD = 3  # この文字数以下の馬名は単独一致だけでは採用しない（誤マッチ対策）
 
+# カタカナ(長音「ー」・半角カナを含む)。馬名の直前/直後がこれなら別の単語の一部とみなす。
+_KATAKANA_RE = re.compile(r"[\u30A0-\u30FF\uFF66-\uFF9F]")
+
+
+def _name_at_word_boundary(name: str, text: str) -> bool:
+    """nameがtext中に、前後をカタカナに挟まれない形で1回以上現れるか。
+
+    単純な部分文字列一致だと「ジオ」が「ラジオNIKKEI」に、「クラン」が別馬の
+    「クランフォード」に一致してしまう（2026-09-28、保存済み候補の短い馬名一致の
+    大半がこの種の誤マッチだった）。馬名はカタカナ表記なので、前後がカタカナなら
+    より長いカタカナ語の一部と判断して不一致にする。全馬名に適用する。
+    """
+    for m in re.finditer(re.escape(name), text):
+        before = text[m.start() - 1] if m.start() > 0 else ""
+        after = text[m.end()] if m.end() < len(text) else ""
+        if not _KATAKANA_RE.match(before) and not _KATAKANA_RE.match(after):
+            return True
+    return False
+
+
+def _core_race_name(race_name: str) -> str:
+    """「農林水産省賞典　小倉記念」→「小倉記念」。
+
+    Rakubaのrace_nameは冠名付きの正式名称のことがあり、投稿では通称(全角スペース
+    以降)で書かれるため、共起判定には通称側を使う。
+    """
+    return race_name.split("\u3000")[-1].strip() if race_name else ""
+
+
+def _race_specific_context(h: HorseRow, candidate_text: str) -> bool:
+    """本文にそのレースを特定できる手がかりがあるか（短い馬名用の文脈条件）。
+
+    - race_nameが空欄のレースはFalse（文脈条件を満たせないので短い馬名は一致させない。
+      安全側に倒す）。
+    - レース名(通称)が本文にあればTrue。
+    - 開催場名+レース番号(「函館9R」「函館 9R」「函館9レース」等)があればTrue。
+    - 開催場名だけではFalse。「函館」は「函館記念」のように別レースの名前に含まれ、
+      同じ開催場の全レースに共通するため、レースを特定する手がかりにならない
+      （2026-09-28、「函館記念…サインもらえた」が函館9R北斗特別の馬『サイン』に
+      誤マッチした実例）。
+    """
+    core = _core_race_name(h.race_name)
+    if not core:
+        return False
+    if core in candidate_text:
+        return True
+    try:
+        race_num = int(h.race_num)
+    except (TypeError, ValueError):
+        return False
+    if not h.jyo_name:
+        return False
+    pattern = rf"{re.escape(h.jyo_name)}\s*{race_num}\s*(?:R|Ｒ|レース)"
+    return re.search(pattern, candidate_text) is not None
+
 
 def _horse_name_matches(h: HorseRow, candidate_text: str) -> bool:
     """馬名が本文に含まれるかを判定する。
 
-    短い馬名（3文字以下）は競馬に無関係な文脈でも偶然一致しやすいため、
-    レース名または開催場名との共起も要求する（例:「一」のような極端な例は
-    そもそもuma_nameとして現実的でないが、2〜3文字の馬名は実在するので
-    安全側に倒す）。
+    1. 全馬名: 一致部分の前後がカタカナなら不一致（_name_at_word_boundary()）。
+    2. 短い馬名（3文字以下）: 一般名詞(「サイン」等)と偶然一致しやすいため、
+       そのレースを特定できる手がかりの共起も要求する（_race_specific_context()）。
     """
-    if h.uma_name not in candidate_text:
+    if not _name_at_word_boundary(h.uma_name, candidate_text):
         return False
     if len(h.uma_name) > SHORT_NAME_THRESHOLD:
         return True
-    context_ok = (h.race_name and h.race_name in candidate_text) or (
-        h.jyo_name and h.jyo_name in candidate_text
-    )
-    return bool(context_ok)
+    return _race_specific_context(h, candidate_text)
 
 
 # find_match()がマッチしなかった理由。呼び出し側(prescriber.py)がDBに保存する
@@ -467,6 +518,13 @@ def find_match(
     ]
     if not horse_candidates:
         return None, REASON_NO_MATCH
+    # 長い馬名の一致がある場合は、短い馬名の一致を候補から外す。_select_candidate()は
+    # 同名馬の別レース判別用で一致の強さを見ないため、放置すると弱い一致(短い馬名)が
+    # 開催日の近さだけで強い一致に勝ってしまう（2026-09-28、本文の話題
+    # 『ファウストラーゼン』ではなく『サイン』が選ばれた実例）。
+    long_matches = [h for h in horse_candidates if len(h.uma_name) > SHORT_NAME_THRESHOLD]
+    if long_matches:
+        horse_candidates = long_matches
     chosen = _select_candidate(horse_candidates, candidate_text, created_at)
 
     mark = mark_for_score(chosen.score)

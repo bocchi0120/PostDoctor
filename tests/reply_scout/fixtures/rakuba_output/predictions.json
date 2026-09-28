@@ -1,6 +1,6 @@
 {
   "generated_at": "2026-07-21T00:00:00",
-  "n_races": 8,
+  "n_races": 12,
   "races": [
     {
       "race_key": "TESTRACE0001",
@@ -100,6 +100,55 @@
       "horses": [
         {"pred_rank": 1, "uma_num": 3, "waku_num": 3, "uma_code": "H0011", "uma_name": "テストホースジュウイチ", "jockey_code": "J011", "jockey_name": "テスト十一郎", "kinryo_kg": 57.0, "ba_weight": 500, "score": 0.70},
         {"pred_rank": 2, "uma_num": 0, "waku_num": 0, "uma_code": "H0012", "uma_name": "テストホースジュウニ", "jockey_code": "J012", "jockey_name": "テスト十二郎", "kinryo_kg": 55.0, "ba_weight": 480, "score": 0.40}
+      ]
+    },
+    {
+      "race_key": "TESTRACE0009",
+      "kaisai_date": "20260628",
+      "jyo_name": "函館",
+      "race_num": "11",
+      "distance": 2000,
+      "track_type": "芝",
+      "race_name": "",
+      "horses": [
+        {"pred_rank": 1, "uma_num": 2, "waku_num": 2, "uma_code": "H0013", "uma_name": "テストラーゼン", "jockey_code": "J000", "jockey_name": "テスト騎手", "kinryo_kg": 55.0, "ba_weight": 480, "score": 0.30}
+      ]
+    },
+    {
+      "race_key": "TESTRACE0010",
+      "kaisai_date": "20260711",
+      "jyo_name": "函館",
+      "race_num": "09",
+      "distance": 2000,
+      "track_type": "芝",
+      "race_name": "テスト北斗特別",
+      "horses": [
+        {"pred_rank": 1, "uma_num": 6, "waku_num": 6, "uma_code": "H0014", "uma_name": "サイン", "jockey_code": "J000", "jockey_name": "テスト騎手", "kinryo_kg": 55.0, "ba_weight": 480, "score": 0.40}
+      ]
+    },
+    {
+      "race_key": "TESTRACE0011",
+      "kaisai_date": "20260712",
+      "jyo_name": "函館",
+      "race_num": "10",
+      "distance": 2000,
+      "track_type": "芝",
+      "race_name": "テスト函館特別",
+      "horses": [
+        {"pred_rank": 1, "uma_num": 3, "waku_num": 3, "uma_code": "H0015", "uma_name": "ジオ", "jockey_code": "J000", "jockey_name": "テスト騎手", "kinryo_kg": 55.0, "ba_weight": 480, "score": 0.50},
+        {"pred_rank": 2, "uma_num": 4, "waku_num": 4, "uma_code": "H0016", "uma_name": "クラン", "jockey_code": "J000", "jockey_name": "テスト騎手", "kinryo_kg": 55.0, "ba_weight": 480, "score": 0.20}
+      ]
+    },
+    {
+      "race_key": "TESTRACE0012",
+      "kaisai_date": "20260809",
+      "jyo_name": "小倉",
+      "race_num": "11",
+      "distance": 2000,
+      "track_type": "芝",
+      "race_name": "農林水産省賞典　テスト小倉杯",
+      "horses": [
+        {"pred_rank": 1, "uma_num": 1, "waku_num": 1, "uma_code": "H0017", "uma_name": "エヒ", "jockey_code": "J000", "jockey_name": "テスト騎手", "kinryo_kg": 55.0, "ba_weight": 480, "score": 0.60}
       ]
     }
   ]
