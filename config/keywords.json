@@ -1,5 +1,16 @@
 {
-  "keywords": ["函館記念", "重賞", "競馬予想"],
+  "keywords": ["重賞", "競馬予想"],
+  "auto_graded_races": {"enabled": true, "grades": ["A", "B", "C"], "max_races": 4},
+  "race_aliases": {
+    "産経賞オールカマー": ["オールカマー"],
+    "朝日杯セントライト記念": ["セントライト記念"],
+    "関西テレビ放送賞ローズステークス": ["ローズS", "ローズステークス"],
+    "産経賞セントウルステークス": ["セントウルS", "セントウルステークス"],
+    "北海道新聞杯クイーンステークス": ["クイーンS", "クイーンステークス"],
+    "京成杯オータムハンデキャップ": ["京成杯AH", "京成杯オータムハンデキャップ"],
+    "キーンランドカップ": ["キーンランドC", "キーンランドカップ"],
+    "チャレンジカップ": ["チャレンジC", "チャレンジカップ"]
+  },
   "trusted_authors": ["keiba_hip", "ublGsoTF98TwgdC", "0630yukihiro", "jyuda_keiba"],
   "daily_read_limit": 50,
   "min_likes": 5,
@@ -7,5 +18,6 @@
   "top_user_lookup_limit": 15,
   "claude_model": "claude-sonnet-5",
   "draft_top_n": 10,
-  "rakuba_output_dir": "C:/Projects/Rakuba/backend/output"
+  "rakuba_output_dir": "C:/Projects/Rakuba/backend/output",
+  "rakuba_cancelled_races_path": "C:/Projects/Rakuba/backend/cancelled_races.json"
 }

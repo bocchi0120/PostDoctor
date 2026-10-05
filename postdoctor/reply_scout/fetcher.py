@@ -12,7 +12,7 @@ DB へのアクセスは行わず、正規化した Candidate のリストを返
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta, timezone
 
 from postdoctor.config import ROOT_DIR, Account
@@ -42,6 +42,29 @@ class ScoutConfig:
     claude_model: str
     draft_top_n: int
     rakuba_output_dir: str
+    # 直近の重賞名をscoutの検索キーワードに自動で加える（orchestrator.run_scout()）
+    auto_graded_races: bool = False
+    graded_grades: tuple[str, ...] = ("A", "B", "C")
+    max_graded_races: int = 4
+    # 正式名称(または通称) -> 検索に使う表記のリスト。複数ならOR検索1回にまとめる
+    race_aliases: dict[str, list[str]] = field(default_factory=dict)
+    rakuba_cancelled_races_path: str = ""
+
+
+MIN_RESULTS_PER_QUERY = 10   # X API v2 recent search の max_results 下限
+MAX_RESULTS_PER_QUERY = 100  # 同 上限
+
+
+def _normalize_aliases(raw) -> dict[str, list[str]]:
+    if not isinstance(raw, dict):
+        return {}
+    aliases = {}
+    for name, value in raw.items():
+        variants = [value] if isinstance(value, str) else list(value or [])
+        variants = [v for v in variants if isinstance(v, str) and v]
+        if variants:
+            aliases[str(name)] = variants
+    return aliases
 
 
 def _load_word_list(path, key: str) -> list[str]:
@@ -63,6 +86,7 @@ def load_config() -> ScoutConfig:
     if not KEYWORDS_PATH.exists():
         raise RuntimeError(f"キーワード設定ファイルが見つかりません: {KEYWORDS_PATH}")
     raw = json.loads(KEYWORDS_PATH.read_text(encoding="utf-8"))
+    auto = raw.get("auto_graded_races") or {}
     return ScoutConfig(
         keywords=raw.get("keywords", []),
         ng_words=_load_word_list(NG_WORDS_PATH, "ng_words"),
@@ -76,33 +100,63 @@ def load_config() -> ScoutConfig:
         claude_model=raw.get("claude_model", "claude-sonnet-5"),
         draft_top_n=raw.get("draft_top_n", 5),
         rakuba_output_dir=raw.get("rakuba_output_dir", ""),
+        auto_graded_races=bool(auto.get("enabled", False)),
+        graded_grades=tuple(auto.get("grades", ["A", "B", "C"])),
+        max_graded_races=int(auto.get("max_races", 4)),
+        race_aliases=_normalize_aliases(raw.get("race_aliases", {})),
+        rakuba_cancelled_races_path=raw.get("rakuba_cancelled_races_path", ""),
     )
 
 
+def _query_term(variants: tuple[str, ...]) -> str:
+    """表記の組を1つの検索語にする。X検索は「〜S」と「〜ステークス」を同一視しないためOR。"""
+    if len(variants) == 1:
+        return variants[0]
+    return "(" + " OR ".join(variants) + ")"
+
+
 def collect_candidates(
-    account: Account, conn, cfg: ScoutConfig
-) -> tuple[list[db.Candidate], int]:
+    account: Account,
+    conn,
+    cfg: ScoutConfig,
+    keyword_groups: list[tuple[str, ...]] | None = None,
+) -> tuple[list[db.Candidate], int, list[tuple[str, int]]]:
     """キーワード検索で新規候補を集める。
 
-    戻り値: (新規候補のリスト, 今回APIから読み取ったツイート数)
+    keyword_groups: 検索する表記の組の優先順リスト（1組=1回の検索）。省略時は
+    cfg.keywords を1語ずつ使う。上限を超える組は後ろから切り捨てる。
+
+    戻り値: (新規候補のリスト, 今回APIから読み取ったツイート数,
+             実際に検索した (キーワード, 読み取り数) のリスト)
     読み取り数は日次上限（cfg.daily_read_limit から本日分を差し引いた残数）を超えない。
+    残数はキーワードごとに均等に割り振る（先頭の1語で残数を使い切って後ろの語が一度も
+    検索されない、という2026-09-08〜10-05に起きていた状態を防ぐ）。max_resultsの下限が
+    10なので検索回数は「残数÷10」回まで。結果が割り当てに満たなかった分は後ろの語に回す。
     """
     already_read_today = db.get_today_usage(conn, "tweet_read")
     remaining = max(cfg.daily_read_limit - already_read_today, 0)
-    if remaining <= 0 or not cfg.keywords:
-        return [], 0
+    groups = keyword_groups if keyword_groups is not None else [(k,) for k in cfg.keywords]
+    if remaining <= 0 or not groups:
+        return [], 0, []
+    groups = groups[: max(remaining // MIN_RESULTS_PER_QUERY, 1)]
 
     client = build_client(account)
     collected: list[db.Candidate] = []
     read_count = 0
+    searched: list[tuple[str, int]] = []
 
-    for keyword in cfg.keywords:
-        if read_count >= remaining:
+    for i, variants in enumerate(groups):
+        left = remaining - read_count
+        if left <= 0:
             break
-        query = f"{keyword} -is:retweet -is:reply lang:ja"
+        per_query = min(
+            MAX_RESULTS_PER_QUERY, max(MIN_RESULTS_PER_QUERY, left // (len(groups) - i))
+        )
+        keyword = variants[0]
+        query = f"{_query_term(variants)} -is:retweet -is:reply lang:ja"
         resp = client.search_recent_tweets(
             query=query,
-            max_results=min(100, max(10, remaining - read_count)),
+            max_results=per_query,
             tweet_fields=[
                 "created_at", "public_metrics", "text", "author_id", "referenced_tweets",
             ],
@@ -110,6 +164,7 @@ def collect_candidates(
             user_fields=["username"],
             user_auth=True,
         )
+        searched.append((keyword, len(resp.data or [])))
         if not resp.data:
             continue
 
@@ -146,7 +201,7 @@ def collect_candidates(
                 )
             )
 
-    return collected, read_count
+    return collected, read_count, searched
 
 
 def enrich_followers(account: Account, author_ids: list[str]) -> dict[str, int]:

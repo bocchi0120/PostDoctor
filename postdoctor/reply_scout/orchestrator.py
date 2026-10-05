@@ -11,12 +11,37 @@ from __future__ import annotations
 
 import os
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 from postdoctor.config import Account
 from postdoctor.reply_scout import analyzer, db, fetcher, prediction_data, prescriber
 
 REPLY_TRACKING_WINDOW_DAYS = 14
+JST = timezone(timedelta(hours=9))
+
+
+def scout_keyword_groups(
+    cfg: fetcher.ScoutConfig, pcfg: prediction_data.PredictionConfig, today: date
+) -> list[tuple[str, ...]]:
+    """scoutの検索語の組（優先順）: 直近の重賞名を先に、keywords.jsonの固定語を後に。
+
+    検索回数が日次上限で足りない週は、後ろ（固定語）から切り捨てられる。
+    """
+    groups: list[tuple[str, ...]] = []
+    if cfg.auto_graded_races:
+        cancelled = Path(cfg.rakuba_cancelled_races_path) if cfg.rakuba_cancelled_races_path else None
+        groups = prediction_data.graded_race_keywords(
+            pcfg, today,
+            cancelled_path=cancelled,
+            aliases=cfg.race_aliases,
+            grades=cfg.graded_grades,
+            max_races=cfg.max_graded_races,
+        )
+    for keyword in cfg.keywords:
+        if not any(keyword in g for g in groups):
+            groups.append((keyword,))
+    return groups
 
 
 def run_scout(account: Account) -> list[str]:
@@ -25,9 +50,12 @@ def run_scout(account: Account) -> list[str]:
     prediction_rows = prediction_data.load_all_predictions(pcfg)
     horse_names = frozenset(prediction_data.all_horse_names(prediction_rows))
     race_names = frozenset(prediction_data.all_race_names(prediction_rows))
+    keyword_groups = scout_keyword_groups(cfg, pcfg, datetime.now(JST).date())
 
     with db.connect(account) as conn:
-        candidates, read_count = fetcher.collect_candidates(account, conn, cfg)
+        candidates, read_count, searched = fetcher.collect_candidates(
+            account, conn, cfg, keyword_groups
+        )
         inserted = db.insert_candidates(conn, candidates) if candidates else 0
         if read_count:
             db.add_usage(conn, "tweet_read", read_count)
@@ -54,6 +82,9 @@ def run_scout(account: Account) -> list[str]:
     tweet_cost = read_count * fetcher.TWEET_READ_COST
     user_cost = len(followers) * fetcher.USER_READ_COST
     return [
+        "検索キーワード（優先順）: " + (", ".join(" / ".join(g) for g in keyword_groups) or "なし"),
+        "実際に検索: "
+        + (", ".join(f"{kw}({n}件)" for kw, n in searched) or "なし（本日の読み取り上限に到達）"),
         f"新規候補 {inserted}件を保存しました。",
         f"ツイート読み取り {read_count}件（概算${tweet_cost:.3f}） + "
         f"フォロワー取得 {len(followers)}件（概算${user_cost:.3f}）。",

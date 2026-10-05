@@ -121,3 +121,53 @@ def test_run_track_passes_remaining_budget_to_reply_detection(tmp_path, monkeypa
     with db.connect(account) as conn:
         assert db.get_today_usage(conn, "tweet_read") == 7  # 4(scout) + 3(reply detection)
     assert any("読み取り3件" in line for line in log)
+
+
+def test_scout_keyword_groups_puts_graded_races_before_fixed_keywords(tmp_path):
+    import json
+    from dataclasses import replace
+    from datetime import date
+
+    from postdoctor.reply_scout import prediction_data
+
+    out_dir = tmp_path / "output"
+    out_dir.mkdir()
+    (out_dir / "predictions_20261004.json").write_text(json.dumps({"races": [
+        {"race_key": "R1", "kaisai_date": "20261004", "jyo_name": "東京", "race_num": 11,
+         "race_name": "毎日王冠", "grade_code": "B", "horses": []},
+        {"race_key": "R2", "kaisai_date": "20261004", "jyo_name": "京都", "race_num": 11,
+         "race_name": "スワンステークス", "grade_code": "B", "horses": []},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    cfg = replace(
+        _cfg(daily_read_limit=50), keywords=["重賞", "毎日王冠", "競馬予想"],
+        auto_graded_races=True, rakuba_output_dir=str(out_dir),
+    )
+    pcfg = prediction_data.load_prediction_config(cfg.rakuba_output_dir)
+
+    groups = orchestrator.scout_keyword_groups(cfg, pcfg, date(2026, 10, 5))
+    # 重賞名が先、固定語が後。固定語と重複する重賞名は1つにまとめる
+    assert groups == [("毎日王冠",), ("スワンS", "スワンステークス"), ("重賞",), ("競馬予想",)]
+
+    disabled = replace(cfg, auto_graded_races=False)
+    assert orchestrator.scout_keyword_groups(disabled, pcfg, date(2026, 10, 5)) == [
+        ("重賞",), ("毎日王冠",), ("競馬予想",),
+    ]
+
+
+def test_run_scout_logs_planned_and_searched_keywords(tmp_path, monkeypatch):
+    account = _account(tmp_path, monkeypatch)
+    monkeypatch.setattr(fetcher, "load_config", lambda: _cfg(daily_read_limit=50))
+    monkeypatch.setattr(
+        orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("毎日王冠",), ("重賞",)]
+    )
+    seen = {}
+
+    def _fake_collect(account, conn, cfg, keyword_groups):
+        seen["groups"] = keyword_groups
+        return [], 0, [("毎日王冠", 7), ("重賞", 0)]
+
+    monkeypatch.setattr(fetcher, "collect_candidates", _fake_collect)
+    log = orchestrator.run_scout(account)
+    assert seen["groups"] == [("毎日王冠",), ("重賞",)]
+    assert log[0] == "検索キーワード（優先順）: 毎日王冠, 重賞"
+    assert log[1] == "実際に検索: 毎日王冠(7件), 重賞(0件)"

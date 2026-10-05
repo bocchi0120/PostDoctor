@@ -20,8 +20,9 @@ import csv
 import hashlib
 import json
 import re
+import unicodedata
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 SNAPSHOT_RE = re.compile(r"predictions_(\d{8})\.json")
@@ -549,3 +550,164 @@ def find_match(
         category=category,
     )
     return match, None
+
+
+# --- scoutの検索キーワード用: 直近の重賞レース名 ---------------------------------
+
+GRADED_CODES = ("A", "B", "C")  # A=G1, B=G2, C=G3（L=リステッド, E=特別は対象外）
+_SATURDAY = 5
+_TUESDAY = 1
+_STAKES_SUFFIX = "ステークス"
+
+
+@dataclass(frozen=True)
+class GradedRace:
+    race_key: str
+    kaisai_date: str
+    jyo_name: str
+    race_num: str
+    race_name: str
+    grade_code: str
+
+
+def graded_race_window(today: date) -> tuple[date, date]:
+    """検索対象にする開催日の範囲: 今日より前の直近の土曜 〜 今日以降の最初の火曜。
+
+    月〜木は前週末の重賞（月曜14時以降は結果も確定）、金〜日は前週末＋当週末の重賞が
+    入る。週末の終わりを火曜にするのは、月曜(祝日)開催の中止が火曜に代替開催されうるため
+    （C:\\Projects\\CLAUDE.md「土〜火」の週の窓）。
+    """
+    start = today - timedelta(days=(today.weekday() - _SATURDAY) % 7 or 7)
+    end = today + timedelta(days=(_TUESDAY - today.weekday()) % 7)
+    return start, end
+
+
+def current_weekend_start(today: date) -> date:
+    """「当週末」の土曜。土〜火はその週末（開催中〜結果確定まで）、水〜金は次の週末。"""
+    days_since_saturday = (today.weekday() - _SATURDAY) % 7  # 土=0 … 金=6
+    if days_since_saturday <= 3:  # 土・日・月・火
+        return today - timedelta(days=days_since_saturday)
+    return today + timedelta(days=7 - days_since_saturday)
+
+
+def _load_graded_races(pcfg: PredictionConfig, grades: tuple[str, ...]) -> list[GradedRace]:
+    """全予測ファイルからグレード対象のレースをrace_key単位で集める（rollingを優先）。"""
+    if not pcfg.output_dir or not pcfg.output_dir.is_dir():
+        return []
+    paths = sorted(
+        p for p in pcfg.output_dir.glob("predictions_*.json") if SNAPSHOT_RE.fullmatch(p.name)
+    )
+    rolling_path = pcfg.output_dir / pcfg.rolling_filename
+    if rolling_path.exists():
+        paths.append(rolling_path)
+
+    merged: dict[str, GradedRace] = {}
+    for path in paths:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for race in raw.get("races", []):
+            grade = str(race.get("grade_code", "") or "")
+            name = str(race.get("race_name", "") or "")
+            if grade not in grades or not name:
+                continue
+            race_key = str(race.get("race_key", ""))
+            merged[race_key] = GradedRace(
+                race_key=race_key,
+                kaisai_date=str(race.get("kaisai_date", "")),
+                jyo_name=str(race.get("jyo_name", "")),
+                race_num=str(race.get("race_num", "")),
+                race_name=name,
+                grade_code=grade,
+            )
+    return list(merged.values())
+
+
+def _load_cancellations(path: Path | None) -> list[dict]:
+    """Rakubaの backend/cancelled_races.json（手動記録）を読む。無い/壊れていれば除外なし。"""
+    if path is None or not path.is_file():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [c for c in raw if isinstance(c, dict)] if isinstance(raw, list) else []
+
+
+def _is_cancelled(race: GradedRace, cancellations: list[dict]) -> bool:
+    """中止された開催日・場のレースか。順延先の新しい日付のキーは別レースとして残る。"""
+    for c in cancellations:
+        if str(c.get("kaisai_date", "")) != race.kaisai_date:
+            continue
+        if str(c.get("jyo_name", "")) != race.jyo_name:
+            continue
+        race_nums = c.get("race_nums")
+        if race_nums is None:
+            return True
+        try:
+            if int(race.race_num) in {int(n) for n in race_nums}:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _search_variants(race_name: str, aliases: dict[str, list[str]]) -> tuple[str, ...]:
+    """検索に使う表記の組。X検索は「〜S」と「〜ステークス」を同一視しないため両方を持つ。
+
+    race_aliasesに正式名称（または全角スペース以降の通称）があればその表記をそのまま使う。
+    無ければ通称を使い、「〜ステークス」なら「〜S」も加える（投稿ではS表記が多い）。
+    Rakubaの名称は全角英数字を含む（「ＣＢＣ賞」「中京２歳ステークス」）ので、自動で作る
+    表記は投稿で一般的な半角にそろえる（NFKC）。
+    """
+    core = _core_race_name(race_name)
+    for key in (race_name, core):
+        if key in aliases and aliases[key]:
+            return tuple(dict.fromkeys(aliases[key]))
+    core = unicodedata.normalize("NFKC", core)
+    if core.endswith(_STAKES_SUFFIX) and len(core) > len(_STAKES_SUFFIX):
+        return (core[: -len(_STAKES_SUFFIX)] + "S", core)
+    return (core,)
+
+
+def graded_race_keywords(
+    pcfg: PredictionConfig,
+    today: date,
+    *,
+    cancelled_path: Path | None,
+    aliases: dict[str, list[str]],
+    grades: tuple[str, ...] = GRADED_CODES,
+    max_races: int = 4,
+) -> list[tuple[str, ...]]:
+    """scoutで検索する直近の重賞レース名（表記の組）を優先順に返す。
+
+    Rakubaが予測しているレースだけが対象（予測の無いレースの投稿を拾っても馬名一致が
+    取れず下書きにならないため、外部の重賞日程は参照しない）。優先順は当週末→前週末、
+    その中でG1→G2→G3、同グレード内は開催日が今日に近い順（金〜日は、前週末のG1より
+    当週末のG2/G3を先にする）。中止日付のレースは除き、同じ表記は1つにまとめる。
+    """
+    start, end = graded_race_window(today)
+    cancellations = _load_cancellations(cancelled_path)
+    in_window = []
+    for race in _load_graded_races(pcfg, grades):
+        race_date = _parse_kaisai_date(race.kaisai_date)
+        if race_date is None or not (start <= race_date <= end):
+            continue
+        if _is_cancelled(race, cancellations):
+            continue
+        in_window.append((race, race_date))
+
+    weekend_start = current_weekend_start(today)
+    in_window.sort(key=lambda rd: (
+        rd[1] < weekend_start,  # 前週末のレースは当週末の後ろ
+        rd[0].grade_code,
+        abs((rd[1] - today).days),
+        rd[0].race_key,
+    ))
+    groups: list[tuple[str, ...]] = []
+    for race, _race_date in in_window:
+        variants = _search_variants(race.race_name, aliases)
+        if variants not in groups:
+            groups.append(variants)
+    return groups[:max_races]
