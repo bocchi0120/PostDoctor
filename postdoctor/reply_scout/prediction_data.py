@@ -235,16 +235,30 @@ def all_race_names(rows: list[HorseRow]) -> set[str]:
     return {r.race_name for r in rows if r.race_name}
 
 
-# 結果カテゴリ: 評価の高低×実際の好走/凡走で4分類し、fact_sentenceとClaudeへの
+# 結果カテゴリ: 評価の高低×実際の好走/凡走で分類し、fact_sentenceとClaudeへの
 # トーン指示の両方をこれに応じて分岐させる（外れも含めて誠実に開示する方針のため、
 # 隠したり弱めたりはしない。トーンだけをカテゴリに応じて変える）。
+# 評価は3帯: 高評価(3番手以内) / 上位評価(4番手〜上位3分の1) / 低評価(それ以下)。
 CATEGORY_HIT = "的中系"            # 高評価 かつ 好走(3着以内)
-CATEGORY_MISS_HIGH = "見込み違い系"  # 高評価 だが 凡走
+CATEGORY_MISS_HIGH = "見込み違い系"  # 高評価・上位評価 だが 凡走（着順が評価順位より下）
 CATEGORY_MISS_LOW = "完敗系"        # 低評価 だが 好走（評価を覆された）
-CATEGORY_AS_EXPECTED = "順当系"     # 低評価 かつ 凡走（評価通り）
+CATEGORY_AS_EXPECTED = "順当系"     # 低評価 かつ 凡走、または上位評価で着順が評価順位以内（評価通り）
+CATEGORY_NEUTRAL = "中立系"        # 上位評価 かつ 好走（的中とも評価を覆されたとも言わない）
 
 HIGH_EVAL_MAX_PRED_RANK = 3     # 3番手評価以内を「高評価」とみなす
 GOOD_RESULT_MAX_CHAKUJUN = 3     # 3着以内を「好走」とみなす
+UPPER_EVAL_FIELD_DIVISOR = 3     # 頭数の上位3分の1までを「上位評価」とみなす
+
+
+def upper_eval_max_pred_rank(field_size: int | None) -> int:
+    """「上位評価」とみなす評価順位の上限: max(3, ceil(頭数/3))。
+
+    18頭→6番手、16頭→6番手、14頭→5番手、9頭以下→3番手。頭数不明(None)は3
+    （=高評価の閾値と同じになり、上位評価の帯は無くなる）。
+    """
+    if not field_size:
+        return HIGH_EVAL_MAX_PRED_RANK
+    return max(HIGH_EVAL_MAX_PRED_RANK, -(-field_size // UPPER_EVAL_FIELD_DIVISOR))
 
 
 @dataclass(frozen=True)
@@ -255,22 +269,30 @@ class PredictionMatch:
     concluded: bool
     chakujun: int | None  # None=未確定, 0=除外
     fact_sentence: str
-    category: str | None  # 的中系/見込み違い系/完敗系/順当系、除外・未確定時はNone
+    category: str | None  # 的中系/見込み違い系/完敗系/順当系/中立系、除外・未確定時はNone
 
 
-def _classify(pred_rank: int, chakujun: int) -> str:
+def _classify(pred_rank: int, chakujun: int, field_size: int | None = None) -> str:
     # 高評価/低評価は事実文に出す「N番手評価」と同じ基準(レース内順位)で判定する。
     # 以前はscore閾値で判定しており、スコアの低い本命が2着だと「評価を大きく
     # 上回りました」になる矛盾があった(docs/design_decisions.md 4節11項)。
+    #
+    # 4番手〜上位3分の1(「上位評価」)は、以前は頭数によらず低評価扱いで、18頭中6番手の
+    # 馬が17着でも「評価通り」になっていた(同15項)。この帯は次のように扱う:
+    # - 凡走で着順が評価順位より下 → 見込み違い系
+    # - 凡走でも着順が評価順位以内(14頭中5番手→5着) → 順当系(評価通り)
+    # - 好走 → 中立系。的中系にはしない(5番手評価の馬の勝利を的中のように語ると
+    #   水増しになる)。完敗系にもしない(上位に見ていた馬なので「大きく上回った」は言い過ぎ)。
     high_eval = 1 <= pred_rank <= HIGH_EVAL_MAX_PRED_RANK
+    upper_eval = HIGH_EVAL_MAX_PRED_RANK < pred_rank <= upper_eval_max_pred_rank(field_size)
     good_result = 1 <= chakujun <= GOOD_RESULT_MAX_CHAKUJUN
-    if high_eval and good_result:
-        return CATEGORY_HIT
-    if high_eval and not good_result:
-        return CATEGORY_MISS_HIGH
-    if not high_eval and good_result:
-        return CATEGORY_MISS_LOW
-    return CATEGORY_AS_EXPECTED
+    if high_eval:
+        return CATEGORY_HIT if good_result else CATEGORY_MISS_HIGH
+    if upper_eval:
+        if good_result:
+            return CATEGORY_NEUTRAL
+        return CATEGORY_MISS_HIGH if chakujun > pred_rank else CATEGORY_AS_EXPECTED
+    return CATEGORY_MISS_LOW if good_result else CATEGORY_AS_EXPECTED
 
 
 def _build_fact_sentence(
@@ -321,9 +343,11 @@ def _build_fact_sentence(
     elif chakujun == 0:
         sentence, category = prefix + "としていました(結果除外)。", None
     else:
-        category = _classify(horse.pred_rank, chakujun)
+        category = _classify(horse.pred_rank, chakujun, horse.field_size)
         if category == CATEGORY_HIT:
             sentence = prefix + f"としていて、実際に{chakujun}着と好走しました。"
+        elif category == CATEGORY_NEUTRAL:
+            sentence = prefix + f"としていて、結果は{chakujun}着でした。"
         elif category == CATEGORY_MISS_HIGH:
             sentence = prefix + f"としていましたが、結果は{chakujun}着にとどまりました。"
         elif category == CATEGORY_MISS_LOW:

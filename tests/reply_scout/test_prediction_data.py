@@ -301,6 +301,88 @@ def test_classify_uses_pred_rank_not_score():
     assert pd._classify(4, 10) == pd.CATEGORY_AS_EXPECTED
 
 
+@pytest.mark.parametrize(
+    "field_size, expected",
+    [(None, 3), (0, 3), (5, 3), (9, 3), (10, 4), (12, 4), (13, 5), (14, 5), (15, 5), (16, 6), (18, 6)],
+)
+def test_upper_eval_max_pred_rank_is_top_third_with_floor_of_three(field_size, expected):
+    assert pd.upper_eval_max_pred_rank(field_size) == expected
+
+
+def test_classify_upper_eval_band_scales_with_field_size():
+    # 凡走で着順が評価順位より下 -> 見込み違い系
+    assert pd._classify(6, 17, 18) == pd.CATEGORY_MISS_HIGH
+    assert pd._classify(4, 9, 14) == pd.CATEGORY_MISS_HIGH
+    # 凡走でも着順が評価順位以内 -> 順当系(評価通り)
+    assert pd._classify(5, 5, 14) == pd.CATEGORY_AS_EXPECTED
+    assert pd._classify(6, 4, 18) == pd.CATEGORY_AS_EXPECTED
+    # 好走 -> 中立系(的中系にも完敗系にもしない)
+    assert pd._classify(5, 1, 16) == pd.CATEGORY_NEUTRAL
+    assert pd._classify(4, 3, 18) == pd.CATEGORY_NEUTRAL
+    # 上位3分の1より下は従来通り
+    assert pd._classify(7, 17, 18) == pd.CATEGORY_AS_EXPECTED
+    assert pd._classify(7, 2, 18) == pd.CATEGORY_MISS_LOW
+    assert pd._classify(6, 10, 14) == pd.CATEGORY_AS_EXPECTED
+    # 3番手以内は頭数によらず従来通り
+    assert pd._classify(3, 3, 18) == pd.CATEGORY_HIT
+    assert pd._classify(3, 4, 18) == pd.CATEGORY_MISS_HIGH
+    # 小頭数は下限3(6頭立ての3番手は高評価のまま、4番手は低評価)
+    assert pd._classify(3, 2, 6) == pd.CATEGORY_HIT
+    assert pd._classify(4, 6, 6) == pd.CATEGORY_AS_EXPECTED
+    # 頭数不明は従来通り3固定
+    assert pd._classify(6, 17, None) == pd.CATEGORY_AS_EXPECTED
+    assert pd._classify(5, 1, None) == pd.CATEGORY_MISS_LOW
+
+
+def _horse(name, race_name, field_size, pred_rank):
+    return pd.HorseRow(
+        race_key="X", kaisai_date="20261012", jyo_name="京都", race_num="11",
+        race_name=race_name, distance=1400, pred_rank=pred_rank, uma_num=1,
+        uma_code="U", uma_name=name, score=0.0, field_size=field_size,
+    )
+
+
+def test_upper_eval_bad_result_is_not_as_expected_shonan_xanadu():
+    """ショウナンザナドゥ(2026-10-12スワンS)の実例の回帰テスト: 18頭中6番手評価で17着を
+    「評価通り」と書かない。上位3分の1の評価で着順が評価順位より下なら見込み違い系。"""
+    horse = _horse("ショウナンザナドゥ", "ＭＢＳ賞スワンステークス", 18, 6)
+    sentence, category = pd._build_fact_sentence(horse, "△", 17)
+    assert category == pd.CATEGORY_MISS_HIGH
+    assert "18頭中6番手評価としていましたが、結果は17着にとどまりました。" in sentence
+    assert "評価通り" not in sentence
+
+
+def test_upper_eval_finishing_within_pred_rank_is_as_expected_elton_barows():
+    """エルトンバローズ(2026-07-26関屋記念)の実例: 14頭中5番手評価で5着は、着順が
+    評価順位以内なので凡走扱いにせず「評価通り」のまま。"""
+    horse = _horse("エルトンバローズ", "関屋記念", 14, 5)
+    sentence, category = pd._build_fact_sentence(horse, "△", 5)
+    assert category == pd.CATEGORY_AS_EXPECTED
+    assert "14頭中5番手評価としていて、結果も5着と評価通りでした。" in sentence
+    assert "とどまりました" not in sentence
+
+
+def test_upper_eval_good_result_uses_neutral_sentence():
+    """4番手〜上位3分の1の評価の馬が好走しても「好走しました」(的中の水増し)とも
+    「大きく上回りました」とも書かず、中立の文面にする。"""
+    horse = _horse("ワイワイレジェンド", "ＮＳＴ賞", 15, 5)
+    sentence, category = pd._build_fact_sentence(horse, "△", 1)
+    assert category == pd.CATEGORY_NEUTRAL
+    assert "15頭中5番手評価としていて、結果は1着でした。" in sentence
+    assert "好走" not in sentence
+    assert "上回" not in sentence
+
+
+def test_every_category_has_a_tone_instruction():
+    from postdoctor.reply_scout import prescriber
+
+    for category in (
+        pd.CATEGORY_HIT, pd.CATEGORY_MISS_HIGH, pd.CATEGORY_MISS_LOW,
+        pd.CATEGORY_AS_EXPECTED, pd.CATEGORY_NEUTRAL,
+    ):
+        assert prescriber._CATEGORY_TONE.get(category)
+
+
 def test_low_score_honmei_placing_2nd_is_not_outperformed(pcfg):
     """ジョバンニ(小倉記念)の実例の回帰テスト: スコアが低い(0.25)本命でも、
     2着なら「評価を大きく上回りました」とは書かない。高評価/低評価は
