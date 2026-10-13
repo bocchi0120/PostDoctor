@@ -104,10 +104,13 @@ row-presence as confirmation once produced a fabricated result on an unrun race)
 this rule. See `C:\Projects\CLAUDE.md` for the full data-contract semantics shared with Rakuba.
 
 **Misses are cited openly, not hidden or softened** — `@rakuba_ai` is positioned as
-"still-validating," so hiding misses would undermine that. `fact_sentence` branches into 4 result
-categories (`CATEGORY_HIT`/`MISS_HIGH`/`MISS_LOW`/`AS_EXPECTED`, by high/low evaluation crossed
-with good/bad placing) with distinct templates and a matching Claude tone instruction per category
-(proud-but-modest / humble-acknowledge-miss / humble-outdone / matter-of-fact).
+"still-validating," so hiding misses would undermine that. `fact_sentence` branches into 5 result
+categories (`CATEGORY_HIT`/`MISS_HIGH`/`MISS_LOW`/`AS_EXPECTED`/`NEUTRAL`, by evaluation band
+crossed with good/bad placing) with distinct templates and a matching Claude tone instruction per
+category (proud-but-modest / humble-acknowledge-miss / humble-outdone / matter-of-fact / neutral).
+Evaluation bands: rank ≤3 = high; rank 4..`max(3, ceil(field_size/3))` = upper (a miss only if it
+finished below its predicted rank; a top-3 finish gets the neutral template, never "hit"); the rest
+= low. See `docs/design_decisions.md` §4 item 15.
 
 **Matching is horse-name-only** — a race-name-only fallback to Rakuba's own top pick was tried and
 removed, because it produced citations disconnected from what the poster actually said (e.g.
