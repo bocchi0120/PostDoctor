@@ -640,6 +640,28 @@ def test_graded_race_keywords_applies_aliases_and_core_name(tmp_path):
     assert groups == [("ローズS", "ローズステークス"), ("新潟記念",)]
 
 
+def test_graded_race_keywords_alias_key_must_match_fullwidth_race_name(tmp_path):
+    """Rakubaのrace_nameは全角英字(ＭＢＳ)のことがある。race_aliasesのキーはその表記と
+    完全一致で引くので、半角(MBS)で書いたキーは効かず、冠名付きの検索語のままになる
+    （2026-10-13、「MBS賞スワンS」で検索していて通称「スワンS」の投稿を拾えなかった）。"""
+    _write_predictions(tmp_path / "output", "predictions_20261012.json", [
+        _race("R1", "20261012", "ＭＢＳ賞スワンステークス", "B", jyo_name="京都"),
+        _race("R2", "20261010", "サウジアラビアロイヤルカップ", "C"),
+    ])
+    aliases = {
+        "ＭＢＳ賞スワンステークス": ["スワンS", "スワンステークス"],
+        "サウジアラビアロイヤルカップ": ["サウジアラビアRC", "サウジアラビアロイヤルカップ"],
+    }
+    assert _graded(tmp_path, date(2026, 10, 13), aliases=aliases) == [
+        ("スワンS", "スワンステークス"),
+        ("サウジアラビアRC", "サウジアラビアロイヤルカップ"),
+    ]
+    halfwidth_key = {"MBS賞スワンステークス": ["スワンS", "スワンステークス"]}
+    assert _graded(tmp_path, date(2026, 10, 13), aliases=halfwidth_key)[0] == (
+        "MBS賞スワンS", "MBS賞スワンステークス",
+    )
+
+
 def test_graded_race_keywords_excludes_cancelled_date_keeps_rescheduled(tmp_path):
     """順延前の日付のキー(中止日)は除外し、代替開催日の新しいキーは残す。同名は1つに。"""
     _write_predictions(tmp_path / "output", "predictions_20260921.json", [
