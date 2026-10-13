@@ -600,9 +600,80 @@ def test_generate_drafts_filtered_reactions_use_filtered_placeholder(monkeypatch
     drafts = prescriber.generate_drafts(_candidate("c1", "x"), match, log=log)
 
     assert drafts == [prescriber.PLACEHOLDER_FILTERED, prescriber.PLACEHOLDER_FILTERED]
-    assert log[0] == "フィルタで破棄: @userc1 1回目 2案"
-    assert log[1] == "フィルタで破棄: @userc1 2回目 2案"
+    # 破棄された案ごとに、該当したフィルタ名と先頭の数文字を出す（1回目2案＋2回目2案）
+    assert log[:4] == [
+        "フィルタで破棄: @userc1 1回目 自分の評価「ずっと期待してたので嬉しいです」",
+        "フィルタで破棄: @userc1 1回目 数字の称賛「この的中率は見習いたいです」",
+        "フィルタで破棄: @userc1 2回目 自分の評価「ずっと期待してたので嬉しいです」",
+        "フィルタで破棄: @userc1 2回目 数字の称賛「この的中率は見習いたいです」",
+    ]
     assert not any(line.startswith("空応答") for line in log)
+
+
+@pytest.mark.parametrize(
+    "reaction, expected",
+    [
+        ("二着だったんですね", ["数字・印"]),
+        ("◎の馬が来ましたね", ["数字・印"]),
+        ("自分も近い見立てでした", ["一致の主張"]),
+        ("ずっと期待してたので嬉しいです", ["自分の評価"]),
+        ("この的中率は見習いたいです", ["数字の称賛"]),
+        # 複数に該当すれば全部（フィルタの定義順）
+        ("自分も高く見てたので今回は完全に見立て違いでした", ["一致の主張", "自分の評価"]),
+        ("回収率145.6%は安定してますね", ["数字・印", "数字の称賛"]),
+        ("いい馬ですよね", []),
+    ],
+)
+def test_discard_reasons_names_every_matching_filter(reaction, expected):
+    assert prescriber._discard_reasons(reaction) == expected
+    # 名前を出すだけで、破棄の判定そのものは変わらない
+    assert prescriber._reaction_is_acceptable(reaction) is (expected == [])
+
+
+def test_discard_filter_names_cover_all_four_filters():
+    assert [name for name, _regex in prescriber._DISCARD_FILTERS] == [
+        "数字・印", "一致の主張", "自分の評価", "数字の称賛",
+    ]
+    assert [regex for _name, regex in prescriber._DISCARD_FILTERS] == [
+        prescriber.NUMERIC_MARK_RE, prescriber.AGREEMENT_CLAIM_RE,
+        prescriber.SELF_STANCE_CLAIM_RE, prescriber.NUMBER_PRAISE_RE,
+    ]
+
+
+def test_discard_log_shows_filter_names_and_truncated_head_not_full_text(monkeypatch):
+    """ログには該当フィルタ名と反応文の先頭20字だけを出す（全文は長いので出さない）。
+    破棄・再試行の動作は変わらない: 1回目で1案破棄→再試行1回→2案そろう。"""
+    match = _find_match("テストホースイチが強かった")
+    long_bad = "Q&A形式で読みやすいです。ローシャムパークは期待してただけに、結果は謙虚に受け止めます"
+    calls = _patch_responses(monkeypatch, [
+        _FakeResponseWithStop(
+            json.dumps({"reactions": [long_bad, "いい馬ですよね"]}, ensure_ascii=False), "end_turn"
+        ),
+        _FakeResponseWithStop('{"reactions": ["気になる存在です"]}', "end_turn"),
+    ])
+    log: list[str] = []
+    drafts = prescriber.generate_drafts(_candidate("c1", "x"), match, log=log)
+
+    assert log == ["フィルタで破棄: @userc1 1回目 自分の評価「Q&A形式で読みやすいです。ローシャムパ…」"]
+    assert long_bad not in log[0]
+    assert len(calls) == 2
+    assert [d.replace(match.fact_sentence, "").strip() for d in drafts] == [
+        "いい馬ですよね", "気になる存在です",
+    ]
+
+
+def test_run_draft_log_carries_filter_names_to_dashboard(monkeypatch, conn):
+    """draft_top_candidates()に渡したlog（run_draft()の戻り値になり、ダッシュボードの
+    結果表示に出る）に、フィルタ名入りの行が積まれる。"""
+    db.insert_candidates(conn, [_candidate("a", "テストホースイチが強かった")])
+    db.set_ranking(conn, [("a", 0.9, 1)])
+    _patch_responses(monkeypatch, [
+        _FakeResponseWithStop('{"reactions": ["自分も近い見立てでした", "いい馬ですよね"]}', "end_turn"),
+        _FakeResponseWithStop('{"reactions": ["気になる存在です"]}', "end_turn"),
+    ])
+    log: list[str] = []
+    assert prescriber.draft_top_candidates(account=None, conn=conn, cfg=_cfg(), log=log) == 1
+    assert log == ["フィルタで破棄: @usera 1回目 一致の主張「自分も近い見立てでした」"]
 
 
 def test_generate_drafts_keeps_one_good_reaction_and_fills_the_other(monkeypatch):

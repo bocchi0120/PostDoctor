@@ -124,7 +124,26 @@ NUMBER_PRAISE_RE = re.compile(
 
 # 反応文に適用する破棄フィルタ。事実文(fact_sentence)には適用しない
 # (事実文は「…1番手評価としていて」のように評価そのものを述べるのが役目)。
-_DISCARD_RES = (NUMERIC_MARK_RE, AGREEMENT_CLAIM_RE, SELF_STANCE_CLAIM_RE, NUMBER_PRAISE_RE)
+# 名前は実行ログに出す（どのフィルタで破棄が多いかを後から数えるため）。
+_DISCARD_FILTERS = (
+    ("数字・印", NUMERIC_MARK_RE),
+    ("一致の主張", AGREEMENT_CLAIM_RE),
+    ("自分の評価", SELF_STANCE_CLAIM_RE),
+    ("数字の称賛", NUMBER_PRAISE_RE),
+)
+_DISCARD_RES = tuple(regex for _name, regex in _DISCARD_FILTERS)
+LOG_REACTION_HEAD_LEN = 20  # ログに出す反応文の先頭文字数（全文は長いので出さない）
+
+
+def _discard_reasons(reaction: str) -> list[str]:
+    """反応文が該当した破棄フィルタの名前（複数に該当すれば全部）。"""
+    return [name for name, regex in _DISCARD_FILTERS if regex.search(reaction)]
+
+
+def _describe_discard(reaction: str) -> str:
+    """「自分の評価・数字の称賛「ずっと期待してたので嬉しいです、この的中…」」。"""
+    head = reaction[:LOG_REACTION_HEAD_LEN] + ("…" if len(reaction) > LOG_REACTION_HEAD_LEN else "")
+    return f"{'・'.join(_discard_reasons(reaction))}「{head}」"
 
 
 def _reaction_is_acceptable(reaction: str) -> bool:
@@ -209,7 +228,7 @@ def _build_user_prompt(candidate: Candidate, reaction_budget: int, category: str
 @dataclass(frozen=True)
 class _CallResult:
     reactions: list[str]      # フィルタを通過した案
-    discarded: int = 0        # フィルタで破棄した案の数
+    discarded: tuple[str, ...] = ()  # 破棄した案ごとの説明（該当フィルタ名＋先頭の数文字）
     problem: str | None = None  # 案を1つも読み取れなかった理由: "empty" / "unparsable"
     stop_reason: str | None = None
 
@@ -248,7 +267,8 @@ def _call_claude(
     # （不自然な文になることを避け、確定していない事実が紛れ込む余地を構造的に無くす）。
     reactions = [r for r in reactions if r]
     kept = [r for r in reactions if _reaction_is_acceptable(r)]
-    return _CallResult(kept, discarded=len(reactions) - len(kept), stop_reason=stop_reason)
+    discarded = tuple(_describe_discard(r) for r in reactions if not _reaction_is_acceptable(r))
+    return _CallResult(kept, discarded=discarded, stop_reason=stop_reason)
 
 
 def _report(log: list[str] | None, line: str) -> None:
@@ -285,9 +305,9 @@ def generate_drafts(
             _report(
                 log, f"解析できない応答: {who} {attempt}回目 stop_reason={result.stop_reason}"
             )
-        if result.discarded:
-            _report(log, f"フィルタで破棄: {who} {attempt}回目 {result.discarded}案")
-        discarded += result.discarded
+        for description in result.discarded:
+            _report(log, f"フィルタで破棄: {who} {attempt}回目 {description}")
+        discarded += len(result.discarded)
         for r in result.reactions:
             if r not in reactions:
                 reactions.append(r)
