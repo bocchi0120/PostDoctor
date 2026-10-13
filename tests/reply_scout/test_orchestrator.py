@@ -213,3 +213,20 @@ def test_run_scout_records_nothing_when_no_search_ran(tmp_path, monkeypatch):
     assert log[2] == "検索語ごとの保存: なし"
     with db.connect(account) as conn:
         assert conn.execute("SELECT COUNT(*) FROM scout_searches").fetchone()[0] == 0
+
+
+def test_run_draft_appends_generation_problems_to_log(tmp_path, monkeypatch):
+    """空応答などの生成時の異常は、run_draft()のログ行としてCLI/ダッシュボードに出る。"""
+    from postdoctor.reply_scout import prescriber
+
+    account = _account(tmp_path, monkeypatch)
+    monkeypatch.setattr(fetcher, "load_config", lambda: _cfg(daily_read_limit=50))
+
+    def _fake_draft(account, conn, cfg, log=None):
+        log.append("空応答: @someone 1回目 stop_reason=max_tokens")
+        return 3
+
+    monkeypatch.setattr(prescriber, "draft_top_candidates", _fake_draft)
+    log = orchestrator.run_draft(account)
+    assert log[0].startswith("3件の候補に下書きを生成しました")
+    assert log[1:] == ["空応答: @someone 1回目 stop_reason=max_tokens"]

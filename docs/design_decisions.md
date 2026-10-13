@@ -299,9 +299,42 @@
     実装時点で未送信の下書きは無かった（TOP10は送信済み1・見送り9に処理済み）ため、
     保存を伴う再生成は行っていない。新プロンプトは4候補の試し生成（保存なし）で確認し、
     出力された反応文はすべてフィルタを通過した。
-    **未対応で見つかった別件**: 試し生成の途中で、Claudeの応答が`stop_reason=max_tokens`・
-    本文が空で返ることがあった（`_call_claude()`の`max_tokens=300`）。2回続くと2案とも
-    プレースホルダになる。フィルタとは無関係で、今回は直していない（10節）。
+    試し生成の途中で、Claudeの応答が空で返る別件が見つかった（18項）。
+
+18. **Claudeの応答が空になり、2案ともプレースホルダになる（2026-10-13発覚・同日修正）**:
+    `_call_claude()`は`max_tokens=300`で呼んでいた。Claude Sonnet 5は`thinking`を指定しないと
+    adaptive thinkingで動き、**思考トークンも`max_tokens`に数えられる**ため、思考だけで上限を
+    使い切ると`stop_reason=max_tokens`・本文なしで返る。再試行も空だと2案ともプレースホルダに
+    なり、しかも文言が「下書き生成はAPIキー設定後に有効化」だったので、キーがあるのに落ちた
+    ことが見分けられなかった。上限16000で12回実測した出力トークンは71〜2049（うち2回が300超）。
+    投稿に数字が多い候補（回収率の自己申告など）で思考が長くなりやすい。
+    → 修正(`prescriber.py`):
+    - `MAX_OUTPUT_TOKENS = 16000`。実測の最大2049に対して十分な余裕を取った。`max_tokens`は
+      課金額ではなく天井で、実際の課金は使った分だけ（最大だった2049トークンで約$0.02）。
+      16000は非ストリーミングでタイムアウトしない範囲の標準的な値。thinkingを無効にする案
+      （Sonnet 5では指定可能）は、反応文の質が変わりうるので採らなかった。
+    - プレースホルダを原因別に3種類にした: `PLACEHOLDER`（APIキー未設定、従来の文言のまま）、
+      `PLACEHOLDER_EMPTY`「空応答のため生成できませんでした」（本文なし・解析不能・案の不足）、
+      `PLACEHOLDER_FILTERED`「フィルタで破棄されたため生成できませんでした」（1案でも破棄フィルタに
+      該当して足りなくなった場合）。ダッシュボードは下書き本文をそのまま表示するだけで、
+      文言による分岐は無い（`dashboard/generator.py`）ので、表示側の変更は不要。
+    - 空応答・解析不能・フィルタ破棄があった試行は「空応答: @user 1回目 stop_reason=max_tokens」
+      の形でログに出す。serveはコンソールの無いpythonwで動くため、`logging`だけでなく
+      `run_draft()`のログ行（CLI出力とダッシュボードの更新結果）にも積む。
+    修正後の試し生成（保存なし、4候補×2回＝16案）ではプレースホルダ0・空応答0。一方で
+    フィルタ破棄は11回の呼び出しで7案あり、再試行で補えたが頻度は高い（どのフィルタかは
+    ログに出していない。10節）。
+    回帰テスト(`tests/reply_scout/test_prescriber.py`):
+    `test_call_claude_requests_enough_output_tokens_for_thinking`、
+    `test_generate_drafts_empty_responses_use_empty_placeholder_and_log_attempts`、
+    `test_generate_drafts_recovers_when_only_first_attempt_is_empty`、
+    `test_generate_drafts_filtered_reactions_use_filtered_placeholder`、
+    `test_generate_drafts_keeps_one_good_reaction_and_fills_the_other`、
+    `test_generate_drafts_unparsable_response_is_logged_separately`、
+    `test_generate_drafts_without_api_key_keeps_original_placeholder`、
+    `test_placeholders_are_distinct_per_cause`、`test_draft_top_candidates_passes_log_through`、
+    `tests/reply_scout/test_orchestrator.py`の
+    `test_run_draft_appends_generation_problems_to_log`。
 
 ## 5. スコアリング・候補選定の判断
 
@@ -464,11 +497,11 @@
   投稿も同様。誤った引用を
   生む方向ではなく取りこぼす方向の不具合。scout検索用の`race_aliases`（5節）を共起判定にも
   流用するのが候補だが、`find_match()`の挙動が変わるので下書き再生成が必要になる。
-- 下書き生成でClaudeの応答が空になることがある — 2026-10-13記録、未修正。
-  `prescriber._call_claude()`は`max_tokens=300`で呼んでおり、`stop_reason=max_tokens`・
-  本文なしで返る回がある（試し生成7回中、少なくとも1回は直接確認。再試行に回った回も
-  同じ原因とみられる）。再試行も空だと2案ともプレースホルダになる。上限の引き上げと、
-  空応答をログに出すことを検討。
+- 反応文のフィルタ破棄の頻度が高い — 2026-10-13記録。4節17項のフィルタ追加後、試し生成
+  11回の呼び出しで7案が破棄された（再試行で補えたのでプレースホルダは0）。ログには
+  「フィルタで破棄: @user 1回目 1案」としか出ず、どのフィルタ（数字／一致主張／過去の評価／
+  数字の称賛）に該当したかは分からない。フィルタ名をログに出し、実測をためてから、
+  プロンプトの調整か再試行回数（現在1回）の見直しを判断する。
 - run_track / 返信取得への読み取り上限（track_read_limit）
 - 時制ミスマッチの近傍判定(b)（実例が貯まってから）
 - 1投稿に複数の該当馬(◎〇▲等)が言及されている場合の優先cite選択（4-9節の修正後も残る別課題。

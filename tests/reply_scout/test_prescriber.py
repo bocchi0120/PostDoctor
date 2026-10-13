@@ -526,3 +526,139 @@ def test_fact_sentence_with_stance_wording_is_kept_verbatim(monkeypatch):
     drafts = prescriber.generate_drafts(_candidate("c2", "x"), match, model="claude-sonnet-5")
     assert all(d.endswith(fact) for d in drafts)
     assert prescriber.PLACEHOLDER not in drafts
+
+
+class _FakeResponseWithStop(_FakeResponse):
+    def __init__(self, text: str, stop_reason: str):
+        super().__init__(text)
+        self.stop_reason = stop_reason
+
+
+def _patch_responses(monkeypatch, responses):
+    """create()が呼ばれるたびにresponsesを順に返す偽クライアントを差し込み、呼び出し記録を返す。"""
+    calls = []
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            return responses[min(len(calls), len(responses)) - 1]
+
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr(prescriber, "_client", lambda: _FakeClient())
+    return calls
+
+
+def test_call_claude_requests_enough_output_tokens_for_thinking(monkeypatch):
+    """max_tokens=300では、adaptive thinkingの思考トークンだけで上限を使い切り、本文が空で
+    返ることがあった(2026-10-13、実測で最大2049トークン)。上限に十分な余裕があること。"""
+    match = _find_match("テストホースイチが強かった")
+    calls = _patch_responses(
+        monkeypatch, [_FakeResponse('{"reactions": ["いい馬ですよね", "気になる存在です"]}')]
+    )
+    prescriber.generate_drafts(_candidate("c1", "x"), match)
+    assert calls[0]["max_tokens"] == prescriber.MAX_OUTPUT_TOKENS
+    assert prescriber.MAX_OUTPUT_TOKENS >= 8000
+
+
+def test_generate_drafts_empty_responses_use_empty_placeholder_and_log_attempts(monkeypatch):
+    """2回とも本文なし(stop_reason=max_tokens)なら、APIキー未設定とは別の文言で埋め、
+    何回目の試行か・stop_reasonをログに残す。"""
+    match = _find_match("テストホースイチが強かった")
+    calls = _patch_responses(monkeypatch, [_FakeResponseWithStop("", "max_tokens")])
+    log: list[str] = []
+    drafts = prescriber.generate_drafts(_candidate("c1", "x"), match, log=log)
+
+    assert len(calls) == prescriber.MAX_ATTEMPTS == 2
+    assert drafts == [prescriber.PLACEHOLDER_EMPTY, prescriber.PLACEHOLDER_EMPTY]
+    assert log[0] == "空応答: @userc1 1回目 stop_reason=max_tokens"
+    assert log[1] == "空応答: @userc1 2回目 stop_reason=max_tokens"
+    assert log[2].startswith("下書き未生成: @userc1 2案")
+
+
+def test_generate_drafts_recovers_when_only_first_attempt_is_empty(monkeypatch):
+    match = _find_match("テストホースイチが強かった")
+    _patch_responses(monkeypatch, [
+        _FakeResponseWithStop("", "max_tokens"),
+        _FakeResponseWithStop('{"reactions": ["いい馬ですよね", "気になる存在です"]}', "end_turn"),
+    ])
+    log: list[str] = []
+    drafts = prescriber.generate_drafts(_candidate("c1", "x"), match, log=log)
+
+    assert all(match.fact_sentence in d for d in drafts)
+    assert not any(p in d for d in drafts for p in prescriber.PLACEHOLDERS)
+    assert log == ["空応答: @userc1 1回目 stop_reason=max_tokens"]
+
+
+def test_generate_drafts_filtered_reactions_use_filtered_placeholder(monkeypatch):
+    """返ってきた案がすべて破棄フィルタに該当した場合は「フィルタで破棄」の文言にする。"""
+    match = _find_match("テストホースイチが強かった")
+    bad = '{"reactions": ["ずっと期待してたので嬉しいです", "この的中率は見習いたいです"]}'
+    _patch_responses(monkeypatch, [_FakeResponseWithStop(bad, "end_turn")])
+    log: list[str] = []
+    drafts = prescriber.generate_drafts(_candidate("c1", "x"), match, log=log)
+
+    assert drafts == [prescriber.PLACEHOLDER_FILTERED, prescriber.PLACEHOLDER_FILTERED]
+    assert log[0] == "フィルタで破棄: @userc1 1回目 2案"
+    assert log[1] == "フィルタで破棄: @userc1 2回目 2案"
+    assert not any(line.startswith("空応答") for line in log)
+
+
+def test_generate_drafts_keeps_one_good_reaction_and_fills_the_other(monkeypatch):
+    match = _find_match("テストホースイチが強かった")
+    mixed = '{"reactions": ["いい馬ですよね", "ずっと期待してたので嬉しいです"]}'
+    _patch_responses(monkeypatch, [_FakeResponseWithStop(mixed, "end_turn")])
+    drafts = prescriber.generate_drafts(_candidate("c1", "x"), match)
+
+    assert drafts[0] == f"いい馬ですよね {match.fact_sentence}"[: prescriber.MAX_DRAFT_LEN]
+    assert drafts[1] == prescriber.PLACEHOLDER_FILTERED
+
+
+def test_generate_drafts_unparsable_response_is_logged_separately(monkeypatch):
+    match = _find_match("テストホースイチが強かった")
+    _patch_responses(monkeypatch, [_FakeResponseWithStop("すみません、書けません", "end_turn")])
+    log: list[str] = []
+    drafts = prescriber.generate_drafts(_candidate("c1", "x"), match, log=log)
+
+    assert drafts == [prescriber.PLACEHOLDER_EMPTY, prescriber.PLACEHOLDER_EMPTY]
+    assert log[0] == "解析できない応答: @userc1 1回目 stop_reason=end_turn"
+
+
+def test_generate_drafts_without_api_key_keeps_original_placeholder(monkeypatch):
+    """APIキー未設定のときは従来の文言のまま。APIは呼ばず、ログも出さない。"""
+    match = _find_match("テストホースイチが強かった")
+    monkeypatch.setattr(prescriber, "_client", lambda: None)
+    log: list[str] = []
+    drafts = prescriber.generate_drafts(_candidate("c1", "x"), match, log=log)
+
+    assert drafts == [prescriber.PLACEHOLDER, prescriber.PLACEHOLDER]
+    assert prescriber.PLACEHOLDER == "[下書き生成はAPIキー設定後に有効化]"
+    assert log == []
+
+
+def test_placeholders_are_distinct_per_cause():
+    assert len(set(prescriber.PLACEHOLDERS)) == 3
+    assert "空応答" in prescriber.PLACEHOLDER_EMPTY
+    assert "フィルタで破棄" in prescriber.PLACEHOLDER_FILTERED
+    assert "APIキー" in prescriber.PLACEHOLDER
+
+
+def test_draft_top_candidates_passes_log_through(monkeypatch, conn):
+    monkeypatch.setattr(prescriber, "_client", lambda: None)
+    db.insert_candidates(conn, [_candidate("a", "テストホースイチが強かった")])
+    db.set_ranking(conn, [("a", 0.9, 1)])
+    seen = {}
+
+    def _fake_generate(candidate, match, model="m", log=None):
+        seen["log"] = log
+        log.append("空応答: @usera 1回目 stop_reason=max_tokens")
+        return [prescriber.PLACEHOLDER_EMPTY, prescriber.PLACEHOLDER_EMPTY]
+
+    monkeypatch.setattr(prescriber, "generate_drafts", _fake_generate)
+    log: list[str] = []
+    count = prescriber.draft_top_candidates(account=None, conn=conn, cfg=_cfg(), log=log)
+
+    assert count == 1
+    assert seen["log"] is log
+    assert log == ["空応答: @usera 1回目 stop_reason=max_tokens"]

@@ -112,10 +112,11 @@ def run_scout(account: Account) -> list[str]:
 
 def run_draft(account: Account) -> list[str]:
     cfg = fetcher.load_config()
+    problems: list[str] = []
     with db.connect(account) as conn:
-        count = prescriber.draft_top_candidates(account, conn, cfg)
+        count = prescriber.draft_top_candidates(account, conn, cfg, log=problems)
     mode = "本実装" if os.environ.get("ANTHROPIC_API_KEY") else "モック（プレースホルダ）"
-    return [f"{count}件の候補に下書きを生成しました（{mode}）。"]
+    return [f"{count}件の候補に下書きを生成しました（{mode}）。"] + problems
 
 
 def run_scout_and_draft(account: Account) -> list[str]:

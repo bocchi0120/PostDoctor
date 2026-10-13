@@ -18,14 +18,17 @@ Claudeが指示に反して数字/マークを含む反応文を返した場合�
 
 Claude drafting is mocked until `ANTHROPIC_API_KEY` is set in .env —
 `prescriber._client()` returns `None` and generate_drafts() returns a
-placeholder string, same call signature either way.
+placeholder string, same call signature either way. Placeholders differ by cause
+(no API key / empty response / discarded by filters); see PLACEHOLDERS.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+from dataclasses import dataclass
 
 from postdoctor.config import Account
 from postdoctor.reply_scout import db, prediction_data
@@ -33,7 +36,22 @@ from postdoctor.reply_scout.db import Candidate
 from postdoctor.reply_scout.fetcher import ScoutConfig
 from postdoctor.reply_scout.prediction_data import PredictionMatch
 
-PLACEHOLDER = "[下書き生成はAPIキー設定後に有効化]"
+logger = logging.getLogger(__name__)
+
+# 下書きを生成できなかったときに、反応文+事実文の代わりに保存する文言。原因別に分ける
+# （以前は全部「APIキー設定後に有効化」で、キーがあるのに空応答で落ちた場合も区別できなかった）。
+PLACEHOLDER = "[下書き生成はAPIキー設定後に有効化]"  # APIキー未設定
+PLACEHOLDER_EMPTY = "[空応答のため生成できませんでした]"  # 本文なし・解析不能・案の不足
+PLACEHOLDER_FILTERED = "[フィルタで破棄されたため生成できませんでした]"  # 破棄フィルタに該当
+PLACEHOLDERS = (PLACEHOLDER, PLACEHOLDER_EMPTY, PLACEHOLDER_FILTERED)
+
+# 出力トークンの上限。Claude Sonnet 5はthinkingを指定しないとadaptive thinkingで動き、
+# 思考トークンもこの上限に数えられる。以前の300では思考だけで使い切り、
+# stop_reason=max_tokens・本文なしで返ることがあった（2026-10-13、12回の実測で出力は
+# 71〜2049トークン、うち2回が300超）。上限は課金額ではなく天井なので、非ストリーミングで
+# タイムアウトしない範囲で余裕を持たせる。
+MAX_OUTPUT_TOKENS = 16000
+MAX_ATTEMPTS = 2  # 2案そろわなければ1回だけ再試行する
 MAX_DRAFT_LEN = 140
 MIN_REACTION_LEN = 20
 # 半角数字・マークに加え、漢数字+「着」（例:「二着」「十二着」）も事実の混入とみなして弾く。
@@ -188,16 +206,21 @@ def _build_user_prompt(candidate: Candidate, reaction_budget: int, category: str
     return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class _CallResult:
+    reactions: list[str]      # フィルタを通過した案
+    discarded: int = 0        # フィルタで破棄した案の数
+    problem: str | None = None  # 案を1つも読み取れなかった理由: "empty" / "unparsable"
+    stop_reason: str | None = None
+
+
 def _call_claude(
     candidate: Candidate, reaction_budget: int, model: str, category: str | None
-) -> list[str]:
-    client = _client()
-    if client is None:
-        return [PLACEHOLDER, PLACEHOLDER]
-
-    resp = client.messages.create(
+) -> _CallResult:
+    """Claudeを1回呼び、反応文の案を返す。呼び出し側で_client()がNoneでないことを確認すること。"""
+    resp = _client().messages.create(
         model=model,
-        max_tokens=300,
+        max_tokens=MAX_OUTPUT_TOKENS,
         system=SYSTEM_PROMPT,
         messages=[
             {
@@ -206,50 +229,89 @@ def _call_claude(
             }
         ],
     )
+    stop_reason = getattr(resp, "stop_reason", None)
     raw_text = "".join(
         block.text for block in resp.content if getattr(block, "type", "") == "text"
     )
+    if not raw_text.strip():
+        return _CallResult([], problem="empty", stop_reason=stop_reason)
     try:
         start = raw_text.index("{")
         end = raw_text.rindex("}") + 1
         parsed = json.loads(raw_text[start:end])
         reactions = [str(r).strip() for r in parsed.get("reactions", [])]
-    except (ValueError, json.JSONDecodeError):
-        reactions = []
+    except (ValueError, json.JSONDecodeError, AttributeError):
+        return _CallResult([], problem="unparsable", stop_reason=stop_reason)
 
     # 多重防御: 数字・マーク、相手の予想との一致・不一致の主張、自分の過去の評価の主張、
     # 相手の数字の称賛が混入した案は、文字を削って繋げるのではなく案ごと破棄する
     # （不自然な文になることを避け、確定していない事実が紛れ込む余地を構造的に無くす）。
-    return [r for r in reactions if _reaction_is_acceptable(r)]
+    reactions = [r for r in reactions if r]
+    kept = [r for r in reactions if _reaction_is_acceptable(r)]
+    return _CallResult(kept, discarded=len(reactions) - len(kept), stop_reason=stop_reason)
+
+
+def _report(log: list[str] | None, line: str) -> None:
+    """生成時の異常を残す。serveはコンソールの無いpythonwで動くので、loggingだけでなく
+    呼び出し元が表示するログ行(orchestrator.run_draft()の戻り値)にも積む。"""
+    logger.warning(line)
+    if log is not None:
+        log.append(line)
 
 
 def generate_drafts(
-    candidate: Candidate, match: PredictionMatch, model: str = "claude-sonnet-5"
+    candidate: Candidate,
+    match: PredictionMatch,
+    model: str = "claude-sonnet-5",
+    log: list[str] | None = None,
 ) -> list[str]:
-    """matchはNoneであってはならない（呼び出し側でNoneならこの関数自体を呼ばないこと）。"""
-    reaction_budget = _reaction_budget(match.fact_sentence)
-    reactions = _call_claude(candidate, reaction_budget, model, match.category)
+    """matchはNoneであってはならない（呼び出し側でNoneならこの関数自体を呼ばないこと）。
 
-    if len(reactions) < 2 and _client() is not None:
-        for r in _call_claude(candidate, reaction_budget, model, match.category):
+    2案そろわなければ1回だけ再試行し、それでも足りない分は原因別のプレースホルダで埋める。
+    空応答・破棄があった試行は、何回目か・stop_reasonとともにlogへ追記する。
+    """
+    if _client() is None:
+        return [PLACEHOLDER, PLACEHOLDER]
+
+    reaction_budget = _reaction_budget(match.fact_sentence)
+    who = f"@{candidate.author_screen_name}"
+    reactions: list[str] = []
+    discarded = 0
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        result = _call_claude(candidate, reaction_budget, model, match.category)
+        if result.problem == "empty":
+            _report(log, f"空応答: {who} {attempt}回目 stop_reason={result.stop_reason}")
+        elif result.problem == "unparsable":
+            _report(
+                log, f"解析できない応答: {who} {attempt}回目 stop_reason={result.stop_reason}"
+            )
+        if result.discarded:
+            _report(log, f"フィルタで破棄: {who} {attempt}回目 {result.discarded}案")
+        discarded += result.discarded
+        for r in result.reactions:
             if r not in reactions:
                 reactions.append(r)
+        if len(reactions) >= 2:
+            break
 
-    while len(reactions) < 2:
-        reactions.append(PLACEHOLDER)
+    if len(reactions) < 2:
+        filler = PLACEHOLDER_FILTERED if discarded else PLACEHOLDER_EMPTY
+        _report(log, f"下書き未生成: {who} {2 - len(reactions)}案 {filler}")
+        reactions += [filler] * (2 - len(reactions))
     reactions = reactions[:2]
 
     drafts = []
     for r in reactions:
-        if r == PLACEHOLDER:
-            drafts.append(PLACEHOLDER)
+        if r in PLACEHOLDERS:
+            drafts.append(r)
         else:
             combined = f"{r[:reaction_budget]} {match.fact_sentence}"
             drafts.append(combined[:MAX_DRAFT_LEN])
     return drafts
 
-
-def draft_top_candidates(account: Account, conn, cfg: ScoutConfig) -> int:
+def draft_top_candidates(
+    account: Account, conn, cfg: ScoutConfig, log: list[str] | None = None
+) -> int:
     """rank設定済み・未送信・上位cfg.draft_top_n件のうち、まだ下書きがないものに
     下書きを生成して保存する。
 
@@ -279,7 +341,7 @@ def draft_top_candidates(account: Account, conn, cfg: ScoutConfig) -> int:
             db.set_prediction_status(conn, ranked.candidate.id, status)
             continue
         db.clear_prediction_status(conn, ranked.candidate.id)
-        drafts = generate_drafts(ranked.candidate, match, model=cfg.claude_model)
+        drafts = generate_drafts(ranked.candidate, match, model=cfg.claude_model, log=log)
         db.save_drafts(conn, ranked.candidate.id, drafts, predictions_hash=predictions_hash)
         count += 1
     return count
