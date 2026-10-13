@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -320,3 +321,208 @@ def test_generate_drafts_discards_candidate7_agreement_claim_and_retries(monkeyp
     for d in drafts:
         assert "近い見立て" not in d
         assert not prescriber.AGREEMENT_CLAIM_RE.search(d.replace(match.fact_sentence, ""))
+
+
+def test_system_prompt_forbids_self_stance_and_number_praise():
+    """自分の過去の評価・期待の主張と、相手の自己申告の成績の称賛を禁じる制約が
+    システムプロンプトに明記されていること（破棄フィルタとの二重防御）。"""
+    assert "自分(Rakuba)がどの馬をどう見ていたかは一切書かない" in prescriber.SYSTEM_PROMPT
+    assert "期待してた" in prescriber.SYSTEM_PROMPT
+    assert "称賛も評価もしない" in prescriber.SYSTEM_PROMPT
+    assert "回収率・的中率・的中続き" in prescriber.SYSTEM_PROMPT
+    assert "レース名が分かる個別の的中だけ" in prescriber.SYSTEM_PROMPT
+
+
+def test_miss_high_tone_does_not_invite_stating_past_evaluation():
+    """見込み違い系のトーン指示が「高く評価していた予測が…」だったことが、反応文に
+    「高く評価していた」を書かせる原因になっていた。指示文自体が破棄対象の言い回しを
+    含まず、どの馬をどう評価していたかは書かないよう明記していること。"""
+    tone = prescriber._CATEGORY_TONE["見込み違い系"]
+    assert "どの馬をどう評価していたかは書かない" in tone
+    assert "今回の予測が外れたことだけ" in tone
+    assert "高く評価していた" not in tone
+
+
+# 過去の反応文351件(2026-10-13集計)にあった、自分の過去の評価・期待を述べる9件すべて。
+PAST_SELF_STANCE_REACTIONS = [
+    "イガッチの適性の広さ、こちらも気になってました",
+    "重賞初挑戦の壁、やっぱり侮れないですね。自分も高く見てたので今回は完全に見立て違いでした",
+    "グランディア軸ですね、気になってた馬なので展開含めて見届けたいです",
+    "グランディア軸のこの並び、個人的にも気になってました",
+    "換金前に踏みとどまれてよかったです、ファウストラーゼン応援馬券とみくちゃんのサインいいですね。"
+    "こちらは高く見ていた予測が外れてしまい、素直に受け止めます",
+    "みくちゃんサインゲットおめでとうございます！自分はこの馬を高く評価していたのですが"
+    "結果はついてこず、言い訳せず反省です",
+    "Q&A形式で読みやすいです。アドマイヤテラ含め注目してましたが、結果的に予測は外れてしまいました",
+    # 事実と逆の実例: ローシャムパークは札幌記念で下位評価だった
+    "Q&A形式で読みやすいです。ローシャムパークは期待してただけに、結果は謙虚に受け止めます",
+    "枠順確定後の細かい評価、見応えありました。こちらは評価していた馬が振るわず反省です",
+]
+
+
+@pytest.mark.parametrize(
+    "reaction",
+    PAST_SELF_STANCE_REACTIONS
+    + [
+        "ずっと推してたので嬉しいです",
+        "前から狙ってた一頭でした",
+        "この馬は本命でした",
+        "高く買っていただけに残念です",
+    ],
+)
+def test_self_stance_claim_re_detects_past_stance(reaction):
+    assert prescriber.SELF_STANCE_CLAIM_RE.search(reaction), reaction
+    assert not prescriber._reaction_is_acceptable(reaction)
+
+
+@pytest.mark.parametrize(
+    "reaction",
+    [
+        # 過去の下書きに実際にあった、現在形・これからの関心（破棄しない）
+        "直近の重賞、穴狙いがしっかり馬券になってるの凄いですね。関屋記念も注目してます",
+        "七夕賞から府中牝馬Sまで穴狙いが続けて的中してますね、関屋記念も期待してしまいます",
+        "数値化しての予想、面白い視点ですね。ファーヴェント注目してみます、当日の走り気になります",
+        "横山武史騎手の手応え、クイーンSでどう結果に繋がるか注目してます",
+        "横山騎手のコメントに気持ちが伝わってきますね。雪辱なるか注目しています",
+        "函館の内容からすると期待したくなりますね。札幌記念でどう動くか注目です",
+        "名前好きって理由も競馬の楽しみ方として好きです。ランスオブカオス気になります",
+        "七夕賞から続けて結果出されてるの見ていました。関屋記念も楽しみにしています",
+        # 過去形でも、自分の評価・期待ではないもの
+        "陽くんの足上げ、気になる仕草ですね。今回は見立てが及びませんでした、素直に受け止めます。",
+        "各路線組の評価が細かくて勉強になります。今回は自分の見立てが外れた形なので、率直に反省しています",
+        "マイネルメモリーの訃報、自分も驚きました",
+        # 「〜していたい」は願望で、過去の主張ではない
+        "これからも注目していたいです",
+    ],
+)
+def test_self_stance_claim_re_allows_present_tense_and_plain_reactions(reaction):
+    assert not prescriber.SELF_STANCE_CLAIM_RE.search(reaction), reaction
+
+
+# 過去の反応文351件のうち NUMBER_PRAISE_RE に一致した8件すべて。
+PAST_NUMBER_PRAISE_REACTIONS = [
+    "重賞での的中率えげつないですね、特に穴人気を的中させてるのが説得力あります😳",
+    "回収率145.6%は安定してますね、東海Sの予想気になります👀",
+    "この的中率は見習いたいです。穴党の視点、勉強になります",
+    "キングジョージ超えなるか楽しみです。ハンデ重賞の的中率、正直見習いたいです",
+    "高人気馬を続けて的中させてる的中率、見習いたいです。こちらも精進します",
+    "この的中率は見習いたいです、東海Sと関屋記念も当たりますように",
+    "波乱決着での的中率の高さ、見習いたいです。素直に脱帽です",
+    "僅差での涙、積み重なると大きいですよね。状況下でのこの数字は立派だと思います",
+]
+
+
+@pytest.mark.parametrize(
+    "reaction", PAST_NUMBER_PRAISE_REACTIONS + ["すごい回収率ですね", "立派な数字だと思います"]
+)
+def test_number_praise_re_detects_praise_of_claimed_numbers(reaction):
+    assert prescriber.NUMBER_PRAISE_RE.search(reaction), reaction
+
+
+@pytest.mark.parametrize(
+    "reaction",
+    [
+        # 数字の語はあるが、称賛していない（過去の下書きの実例）
+        "朝日杯世代の層の厚さが数字に表れてますね、当時の掲示板組が揃って重賞馬になるのは珍しい記録だと思います",
+        "追い切りの数字もしっかり出てますね。夏場の巻き返しに期待したいところです",
+        "僅差での結果が積み重なると数字の見え方も変わりますよね。状況を冷静に受け止める姿勢、勉強になります",
+        "ラップとPCIの数値、見ごたえありました。次走チェック馬の走り楽しみです",
+        "回収率まで含めて振り返るの参考になります。当たり外れ含めて見せる姿勢いいですね",
+        "回収率の数字が並んでるとつい見入っちゃいます、CBC賞の結果も楽しみにしてます",
+        # 境界例: 記録する姿勢・個別の配当への言及は破棄しない（プロンプト側で抑える）
+        "回収率更新しっかり記録されてるの偉い、フェアリーSも楽しみですね",
+        "単勝配当も含めてしっかり当ててるの凄いです、更新楽しみにしてます",
+        # 的中実績の称賛は破棄に入れない（プロンプトでの禁止のみ）
+        "ハンデ重賞での的中実績、素直にすごいです。見習いたいです",
+        # レース名の分かる個別の的中へのお祝いは許容
+        "小倉記念のワンツー的中お見事です、勉強になります",
+        "おはようございます☀️ フロムダスク的中とは、その着眼点すごいです。馬券外れは悔しいですね…",
+    ],
+)
+def test_number_praise_re_allows_non_praise_and_single_race_congratulations(reaction):
+    assert not prescriber.NUMBER_PRAISE_RE.search(reaction), reaction
+
+
+def test_generate_drafts_discards_self_stance_and_number_praise_and_retries(monkeypatch):
+    """2026-10-13に未送信の下書きに残っていた2例が返ってきても下書きに残らないこと。"""
+    match = _find_match("テストホースイチが強かった")
+    assert match is not None
+    calls = {"n": 0}
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _FakeResponse(json.dumps({"reactions": [
+                    "Q&A形式で読みやすいです。ローシャムパークは期待してただけに、結果は謙虚に受け止めます",
+                    "僅差での涙、積み重なると大きいですよね。状況下でのこの数字は立派だと思います",
+                ]}, ensure_ascii=False))
+            return _FakeResponse('{"reactions": ["いい馬ですよね", "気になる存在です"]}')
+
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr(prescriber, "_client", lambda: _FakeClient())
+    candidate = _candidate("c5", "札幌記念のQ&Aをアップしました")
+    drafts = prescriber.generate_drafts(candidate, match, model="claude-sonnet-5")
+
+    assert calls["n"] == 2
+    assert [d.replace(match.fact_sentence, "").strip() for d in drafts] == [
+        "いい馬ですよね", "気になる存在です",
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "テストホースイチが強かった",        # 的中系・本命
+        "テストホースニに注目していました",  # 見込み違い系
+        "テストホースゴに期待しています",    # 未確定
+        "テストホースキュウは惜しかった",    # 低スコアの本命
+    ],
+)
+def test_discard_filters_apply_to_reaction_only_not_fact_sentence(monkeypatch, text):
+    """破棄フィルタの対象は反応文だけ。事実文は「…本命(N頭中1番手評価)としていて」のように
+    評価そのものを述べるのが役目なので、事実文が付いた下書きは破棄されずそのまま残る。"""
+    match = _find_match(text)
+    assert match is not None
+    assert "評価" in match.fact_sentence
+    # 事実文は数字を含むので、もし下書き全体にフィルタを掛けていたら必ず破棄される
+    assert prescriber.NUMERIC_MARK_RE.search(match.fact_sentence)
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            return _FakeResponse('{"reactions": ["いい馬ですよね", "気になる存在です"]}')
+
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr(prescriber, "_client", lambda: _FakeClient())
+    drafts = prescriber.generate_drafts(_candidate("c1", text), match, model="claude-sonnet-5")
+    assert drafts == [
+        f"いい馬ですよね {match.fact_sentence}"[: prescriber.MAX_DRAFT_LEN],
+        f"気になる存在です {match.fact_sentence}"[: prescriber.MAX_DRAFT_LEN],
+    ]
+
+
+def test_fact_sentence_with_stance_wording_is_kept_verbatim(monkeypatch):
+    """事実文が破棄用の正規表現に一致する言い回し（旧テンプレート「…と評価していましたが」）
+    であっても、事実文は検査対象ではないので下書きに残る。"""
+    from dataclasses import replace
+
+    base = _find_match("テストホースニに注目していました")
+    fact = "うちのAIモデルはテストステークスで『テストホースニ』を高く評価していましたが、結果は届きませんでした。"
+    assert prescriber.SELF_STANCE_CLAIM_RE.search(fact)
+    match = replace(base, fact_sentence=fact)
+
+    class _FakeMessages:
+        def create(self, **kwargs):
+            return _FakeResponse('{"reactions": ["いい馬ですよね", "気になる存在です"]}')
+
+    class _FakeClient:
+        messages = _FakeMessages()
+
+    monkeypatch.setattr(prescriber, "_client", lambda: _FakeClient())
+    drafts = prescriber.generate_drafts(_candidate("c2", "x"), match, model="claude-sonnet-5")
+    assert all(d.endswith(fact) for d in drafts)
+    assert prescriber.PLACEHOLDER not in drafts
