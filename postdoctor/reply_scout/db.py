@@ -91,6 +91,19 @@ CREATE TABLE IF NOT EXISTS reply_responses (
     acknowledged      INTEGER DEFAULT 0,
     fetched_at        TEXT
 );
+CREATE TABLE IF NOT EXISTS scout_searches (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_at                  TEXT NOT NULL,     -- scout実行時刻(UTC)。同じ実行の行は同じ値
+    position                INTEGER NOT NULL,  -- その実行での検索順(0始まり)
+    keyword                 TEXT NOT NULL,     -- 表記の組の先頭(candidates.keywordと同じ値)
+    query                   TEXT NOT NULL,     -- X APIに送った検索クエリそのもの
+    max_results             INTEGER NOT NULL,
+    read_count              INTEGER NOT NULL,  -- APIから返った件数(=課金対象の読み取り数)
+    saved_count             INTEGER NOT NULL,  -- 新規候補として保存した件数
+    dropped_known           INTEGER NOT NULL,  -- 既にcandidatesにあったID
+    dropped_low_engagement  INTEGER NOT NULL,  -- min_likes/min_replies未満
+    dropped_duplicate       INTEGER NOT NULL   -- 同じ実行の前の検索語で既に拾っていたID
+);
 """
 
 # candidatesテーブルへの追加カラム（このプロジェクト初のスキーマ変更）。
@@ -123,6 +136,20 @@ class Candidate:
     keyword: str
     author_followers: int | None = None
     is_quote: bool = False
+
+
+@dataclass(frozen=True)
+class SearchStat:
+    """scoutの検索1回分の内訳。read_count = saved + dropped_* の合計になる。"""
+
+    keyword: str
+    query: str
+    max_results: int
+    read_count: int
+    saved_count: int
+    dropped_known: int
+    dropped_low_engagement: int
+    dropped_duplicate: int
 
 
 @dataclass(frozen=True)
@@ -195,6 +222,47 @@ def insert_candidates(conn: sqlite3.Connection, candidates: list[Candidate]) -> 
         count += cur.rowcount
     conn.commit()
     return count
+
+
+def save_scout_searches(conn: sqlite3.Connection, stats: list[SearchStat]) -> str | None:
+    """scout1回分の検索内訳を保存し、その実行のrun_atを返す（statsが空ならNone）。
+
+    run_scout()のログ「実際に検索: …」はブラウザ/コンソールに返すだけで残らず、後から
+    「どの語を何件読んで何件保存したか」を確認できなかった（2026-10-13）ための記録。
+    """
+    if not stats:
+        return None
+    run_at = _utc_now_iso()
+    conn.executemany(
+        """
+        INSERT INTO scout_searches
+          (run_at, position, keyword, query, max_results, read_count, saved_count,
+           dropped_known, dropped_low_engagement, dropped_duplicate)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+        """,
+        [
+            (
+                run_at, i, s.keyword, s.query, s.max_results, s.read_count, s.saved_count,
+                s.dropped_known, s.dropped_low_engagement, s.dropped_duplicate,
+            )
+            for i, s in enumerate(stats)
+        ],
+    )
+    conn.commit()
+    return run_at
+
+
+def get_scout_searches(conn: sqlite3.Connection, run_at: str) -> list[SearchStat]:
+    """指定した実行(run_at)の検索内訳を検索順に返す。"""
+    rows = conn.execute(
+        """
+        SELECT keyword, query, max_results, read_count, saved_count,
+               dropped_known, dropped_low_engagement, dropped_duplicate
+        FROM scout_searches WHERE run_at = ? ORDER BY position ASC
+        """,
+        (run_at,),
+    ).fetchall()
+    return [SearchStat(*r) for r in rows]
 
 
 def update_followers(conn: sqlite3.Connection, followers_by_author: dict[str, int]) -> None:

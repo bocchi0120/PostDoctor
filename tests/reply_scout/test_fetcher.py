@@ -239,6 +239,69 @@ def test_collect_candidates_defaults_to_config_keywords(tmp_path, monkeypatch):
     ]
 
 
+def _stats_scenario(tmp_path, monkeypatch, stats):
+    """A: 既知1・いいね不足1・保存1 / B: Aで拾った投稿の重複1・保存1 / C: 0件。"""
+    from postdoctor import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    liked = {"like_count": 9}
+    suffix = " -is:retweet -is:reply lang:ja"
+    client = _FakeClient({
+        "A" + suffix: _Resp([
+            _Tweet("known-1", "1", "t", public_metrics=liked),
+            _Tweet("low-1", "1", "t", public_metrics={"like_count": 4}),
+            _Tweet("new-1", "1", "t", public_metrics=liked),
+        ], users=[_User("1", "u")]),
+        "(B OR Bステークス)" + suffix: _Resp([
+            _Tweet("new-1", "1", "t", public_metrics=liked),
+            _Tweet("new-2", "1", "t", public_metrics=liked),
+        ], users=[_User("1", "u")]),
+    })
+    monkeypatch.setattr(fetcher, "build_client", lambda account: client)
+    cfg = _scout_cfg(daily_read_limit=30, min_likes=5)
+    groups = [("A",), ("B", "Bステークス"), ("C",)]
+    with db.connect(_account()) as conn:
+        db.insert_candidates(conn, [db.Candidate(
+            id="known-1", text="t", author_id="1", author_screen_name="u",
+            created_at="2026-07-21T00:00:00+09:00", likes=9, retweets=0, replies=0, quotes=0,
+            keyword="A",
+        )])
+        result = fetcher.collect_candidates(_account(), conn, cfg, groups, stats=stats)
+        inserted = db.insert_candidates(conn, result[0])
+    return result, inserted
+
+
+def test_collect_candidates_records_per_keyword_stats(tmp_path, monkeypatch):
+    """検索語ごとの読み取り・保存・落とした理由を記録する（2026-10-13、50件読んで2件しか
+    保存されなかった理由を後から確認できなかったため）。"""
+    stats: list[db.SearchStat] = []
+    (_candidates, read_count, _searched), inserted = _stats_scenario(tmp_path, monkeypatch, stats)
+
+    suffix = " -is:retweet -is:reply lang:ja"
+    assert stats == [
+        db.SearchStat("A", "A" + suffix, 10, 3, 1, 1, 1, 0),
+        db.SearchStat("B", "(B OR Bステークス)" + suffix, 13, 2, 1, 0, 0, 1),
+        db.SearchStat("C", "C" + suffix, 25, 0, 0, 0, 0, 0),
+    ]
+    # 内訳は実際の読み取り数・保存数と一致する
+    assert sum(s.read_count for s in stats) == read_count == 5
+    assert sum(s.saved_count for s in stats) == inserted == 2
+    for s in stats:
+        assert s.read_count == (
+            s.saved_count + s.dropped_known + s.dropped_low_engagement + s.dropped_duplicate
+        )
+
+
+def test_collect_candidates_stats_do_not_change_results(tmp_path, monkeypatch):
+    """statsは記録だけ。渡しても渡さなくても、候補・読み取り数・検索語は同じ。"""
+    with_stats, _ = _stats_scenario(tmp_path / "a", monkeypatch, [])
+    (tmp_path / "b").mkdir()
+    without_stats, _ = _stats_scenario(tmp_path / "b", monkeypatch, None)
+    assert with_stats == without_stats
+    assert [c.id for c in with_stats[0]] == ["new-1", "new-1", "new-2"]
+    assert with_stats[2] == [("A", 3), ("B", 2), ("C", 0)]
+
+
 def test_load_config_reads_auto_graded_races_and_aliases(tmp_path, monkeypatch):
     keywords_path = tmp_path / "keywords.json"
     keywords_path.write_text(json.dumps({

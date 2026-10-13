@@ -221,6 +221,39 @@
     `test_upper_eval_good_result_uses_neutral_sentence`、
     `test_every_category_has_a_tone_instruction`。
 
+16. **scoutの検索内訳が残らず、保存されなかった理由を後から確認できなかった（2026-10-13発覚）**:
+    重賞名の自動追加（14項）後の初回scout（10/13）は50件読んで保存2件だったが、
+    `run_scout()`のログ「実際に検索: …」はブラウザ/コンソールに返すだけで、語ごとの読み取り数も
+    落とした理由も残っていなかった。コードと状況から「ほぼ全件がいいね5未満」と推定はできたが
+    （recent searchは直近7日分のみで、既存候補は8日以上前の投稿＝既知IDはあり得ない）、
+    実数は復元できなかった。
+    → 修正: `reply_scout.db`に`scout_searches`テーブルを追加（`db.py`の`SCHEMA`、
+    `save_scout_searches()`/`get_scout_searches()`）。検索1回につき1行で、クエリ文字列・
+    `max_results`・読み取り数・保存数・落とした理由別の件数（既知ID／いいね等不足／同一実行内の
+    重複）を持つ。`fetcher.collect_candidates()`は任意引数`stats`に内訳を追記するだけで、
+    検索・選別の挙動は変えていない（重複した投稿も従来通り`collected`に入り、
+    `insert_candidates()`のON CONFLICTで無視される）。実行ログにも
+    「検索語ごとの保存: スワンS 読取10→保存1（いいね等不足9）」の行を追加
+    （`orchestrator._search_stat_summary()`）。ログファイルではなくDBにしたのは、既存の
+    バックアップ手順に乗り、後からSQLで集計できるため。ダッシュボード表示は未実装。
+    回帰テスト: `tests/reply_scout/test_fetcher.py`の
+    `test_collect_candidates_records_per_keyword_stats`、
+    `test_collect_candidates_stats_do_not_change_results`、`tests/reply_scout/test_db.py`の
+    `test_init_db_adds_scout_searches_to_existing_db_without_touching_other_tables`、
+    `test_save_and_get_scout_searches_keeps_order_and_separates_runs`、
+    `test_save_scout_searches_with_no_stats_writes_nothing`、
+    `tests/reply_scout/test_orchestrator.py`の
+    `test_run_scout_saves_search_stats_and_logs_saved_counts`、
+    `test_run_scout_records_nothing_when_no_search_ran`。
+    同日、`race_aliases`に「ＭＢＳ賞スワンステークス」「サウジアラビアロイヤルカップ」を追加
+    （10/13は「MBS賞スワンS」「サウジアラビアロイヤルカップ」で検索しており、通称
+    「スワンS」「サウジアラビアRC」の投稿を拾えていなかった）。**キーはRakubaの`race_name`と
+    完全一致**で引くので、全角英字（ＭＢＳ）はそのまま全角で書く
+    （`test_graded_race_keywords_alias_key_must_match_fullwidth_race_name`）。
+    見送り（2026-10-13）: 通称の自動生成（〜カップ→C、冠名の自動除去）、counts APIでの
+    表記ゆれ確認、`sort_order="relevancy"`、検索語の削減。まず`scout_searches`の実測を
+    数回分ためてから判断する。
+
 ## 5. スコアリング・候補選定の判断
 
 - NGワードは2リスト: 煽り系（スコア半減）と勧誘・宣伝系「限定/有料/教える等」（ハード除外）。

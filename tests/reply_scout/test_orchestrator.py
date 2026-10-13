@@ -162,7 +162,7 @@ def test_run_scout_logs_planned_and_searched_keywords(tmp_path, monkeypatch):
     )
     seen = {}
 
-    def _fake_collect(account, conn, cfg, keyword_groups):
+    def _fake_collect(account, conn, cfg, keyword_groups, stats=None):
         seen["groups"] = keyword_groups
         return [], 0, [("毎日王冠", 7), ("重賞", 0)]
 
@@ -171,3 +171,45 @@ def test_run_scout_logs_planned_and_searched_keywords(tmp_path, monkeypatch):
     assert seen["groups"] == [("毎日王冠",), ("重賞",)]
     assert log[0] == "検索キーワード（優先順）: 毎日王冠, 重賞"
     assert log[1] == "実際に検索: 毎日王冠(7件), 重賞(0件)"
+
+
+def test_run_scout_saves_search_stats_and_logs_saved_counts(tmp_path, monkeypatch):
+    """検索語ごとの内訳をscout_searchesに保存し、実行ログにも保存件数を出す。"""
+    account = _account(tmp_path, monkeypatch)
+    monkeypatch.setattr(fetcher, "load_config", lambda: _cfg(daily_read_limit=50))
+    monkeypatch.setattr(
+        orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("毎日王冠",), ("重賞",)]
+    )
+    recorded = [
+        db.SearchStat("毎日王冠", "毎日王冠 -is:retweet", 25, 10, 2, 1, 7, 0),
+        db.SearchStat("重賞", "重賞 -is:retweet", 25, 4, 0, 0, 3, 1),
+    ]
+
+    def _fake_collect(account, conn, cfg, keyword_groups, stats=None):
+        stats.extend(recorded)
+        return [], 0, [("毎日王冠", 10), ("重賞", 4)]
+
+    monkeypatch.setattr(fetcher, "collect_candidates", _fake_collect)
+    log = orchestrator.run_scout(account)
+    assert log[2] == (
+        "検索語ごとの保存: 毎日王冠 読取10→保存2（いいね等不足7・既知1）, "
+        "重賞 読取4→保存0（いいね等不足3・重複1）"
+    )
+
+    with db.connect(account) as conn:
+        run_ats = [r[0] for r in conn.execute("SELECT DISTINCT run_at FROM scout_searches")]
+        assert len(run_ats) == 1
+        assert db.get_scout_searches(conn, run_ats[0]) == recorded
+
+
+def test_run_scout_records_nothing_when_no_search_ran(tmp_path, monkeypatch):
+    account = _account(tmp_path, monkeypatch)
+    monkeypatch.setattr(fetcher, "load_config", lambda: _cfg(daily_read_limit=50))
+    monkeypatch.setattr(orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("重賞",)])
+    monkeypatch.setattr(
+        fetcher, "collect_candidates", lambda account, conn, cfg, groups, stats=None: ([], 0, [])
+    )
+    log = orchestrator.run_scout(account)
+    assert log[2] == "検索語ごとの保存: なし"
+    with db.connect(account) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM scout_searches").fetchone()[0] == 0

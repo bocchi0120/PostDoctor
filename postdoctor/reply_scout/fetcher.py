@@ -120,6 +120,7 @@ def collect_candidates(
     conn,
     cfg: ScoutConfig,
     keyword_groups: list[tuple[str, ...]] | None = None,
+    stats: list[db.SearchStat] | None = None,
 ) -> tuple[list[db.Candidate], int, list[tuple[str, int]]]:
     """キーワード検索で新規候補を集める。
 
@@ -132,6 +133,9 @@ def collect_candidates(
     残数はキーワードごとに均等に割り振る（先頭の1語で残数を使い切って後ろの語が一度も
     検索されない、という2026-09-08〜10-05に起きていた状態を防ぐ）。max_resultsの下限が
     10なので検索回数は「残数÷10」回まで。結果が割り当てに満たなかった分は後ろの語に回す。
+
+    stats: リストを渡すと、検索1回ごとの内訳（読み取り・保存・落とした理由別の件数）を
+    追記する。記録用で、検索や候補の選別には影響しない。
     """
     already_read_today = db.get_today_usage(conn, "tweet_read")
     remaining = max(cfg.daily_read_limit - already_read_today, 0)
@@ -144,6 +148,7 @@ def collect_candidates(
     collected: list[db.Candidate] = []
     read_count = 0
     searched: list[tuple[str, int]] = []
+    collected_ids: set[str] = set()
 
     for i, variants in enumerate(groups):
         left = remaining - read_count
@@ -165,7 +170,10 @@ def collect_candidates(
             user_auth=True,
         )
         searched.append((keyword, len(resp.data or [])))
+        dropped_known = dropped_low_engagement = dropped_duplicate = 0
         if not resp.data:
+            if stats is not None:
+                stats.append(db.SearchStat(keyword, query, per_query, 0, 0, 0, 0, 0))
             continue
 
         read_count += len(resp.data)
@@ -175,12 +183,19 @@ def collect_candidates(
 
         for t in resp.data:
             if str(t.id) in known:
+                dropped_known += 1
                 continue
             m = t.public_metrics or {}
             likes = m.get("like_count", 0)
             replies_n = m.get("reply_count", 0)
             if likes < cfg.min_likes or replies_n < cfg.min_replies:
+                dropped_low_engagement += 1
                 continue
+            # 同じ実行の前の語で拾った投稿は、従来通りcollectedには入れる
+            # (db.insert_candidates()のON CONFLICTで無視される)。内訳の上でだけ区別する。
+            if str(t.id) in collected_ids:
+                dropped_duplicate += 1
+            collected_ids.add(str(t.id))
             user = users_by_id.get(t.author_id)
             screen_name = user.username if user else str(t.author_id)
             created_jst = t.created_at.astimezone(JST)
@@ -198,6 +213,15 @@ def collect_candidates(
                     quotes=m.get("quote_count", 0),
                     keyword=keyword,
                     is_quote=is_quote,
+                )
+            )
+
+        if stats is not None:
+            dropped = dropped_known + dropped_low_engagement + dropped_duplicate
+            stats.append(
+                db.SearchStat(
+                    keyword, query, per_query, len(resp.data), len(resp.data) - dropped,
+                    dropped_known, dropped_low_engagement, dropped_duplicate,
                 )
             )
 

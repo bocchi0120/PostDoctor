@@ -44,6 +44,21 @@ def scout_keyword_groups(
     return groups
 
 
+def _search_stat_summary(stat: db.SearchStat) -> str:
+    """「毎日王冠 読取10→保存2（いいね等不足7・既知1）」。落とした理由は0件のものを省く。"""
+    reasons = [
+        f"{label}{n}"
+        for label, n in (
+            ("いいね等不足", stat.dropped_low_engagement),
+            ("既知", stat.dropped_known),
+            ("重複", stat.dropped_duplicate),
+        )
+        if n
+    ]
+    detail = f"（{'・'.join(reasons)}）" if reasons else ""
+    return f"{stat.keyword} 読取{stat.read_count}→保存{stat.saved_count}{detail}"
+
+
 def run_scout(account: Account) -> list[str]:
     cfg = fetcher.load_config()
     pcfg = prediction_data.load_prediction_config(cfg.rakuba_output_dir)
@@ -52,11 +67,13 @@ def run_scout(account: Account) -> list[str]:
     race_names = frozenset(prediction_data.all_race_names(prediction_rows))
     keyword_groups = scout_keyword_groups(cfg, pcfg, datetime.now(JST).date())
 
+    search_stats: list[db.SearchStat] = []
     with db.connect(account) as conn:
         candidates, read_count, searched = fetcher.collect_candidates(
-            account, conn, cfg, keyword_groups
+            account, conn, cfg, keyword_groups, stats=search_stats
         )
         inserted = db.insert_candidates(conn, candidates) if candidates else 0
+        db.save_scout_searches(conn, search_stats)
         if read_count:
             db.add_usage(conn, "tweet_read", read_count)
 
@@ -85,6 +102,7 @@ def run_scout(account: Account) -> list[str]:
         "検索キーワード（優先順）: " + (", ".join(" / ".join(g) for g in keyword_groups) or "なし"),
         "実際に検索: "
         + (", ".join(f"{kw}({n}件)" for kw, n in searched) or "なし（本日の読み取り上限に到達）"),
+        "検索語ごとの保存: " + (", ".join(_search_stat_summary(s) for s in search_stats) or "なし"),
         f"新規候補 {inserted}件を保存しました。",
         f"ツイート読み取り {read_count}件（概算${tweet_cost:.3f}） + "
         f"フォロワー取得 {len(followers)}件（概算${user_cost:.3f}）。",

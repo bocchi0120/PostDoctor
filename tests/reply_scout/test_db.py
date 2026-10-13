@@ -22,6 +22,39 @@ def test_init_db_migration_is_idempotent(conn):
     assert "prediction_status" in cols
 
 
+def test_init_db_adds_scout_searches_to_existing_db_without_touching_other_tables():
+    """scout_searchesが無い既存DBでも、init_db()でテーブルが足され、既存の行は残る。"""
+    connection = sqlite3.connect(":memory:")
+    db.init_db(connection)
+    db.insert_candidates(connection, [_candidate("keep")])
+    connection.execute("DROP TABLE scout_searches")
+    connection.commit()
+
+    db.init_db(connection)
+    cols = {row[1] for row in connection.execute("PRAGMA table_info(scout_searches)").fetchall()}
+    assert {"run_at", "position", "keyword", "query", "read_count", "saved_count"} <= cols
+    assert connection.execute("SELECT id FROM candidates").fetchall() == [("keep",)]
+    connection.close()
+
+
+def test_save_and_get_scout_searches_keeps_order_and_separates_runs(conn):
+    first = [
+        db.SearchStat("スワンS", "(スワンS OR スワンステークス) -is:retweet", 10, 10, 1, 0, 9, 0),
+        db.SearchStat("重賞", "重賞 -is:retweet", 10, 10, 0, 2, 7, 1),
+    ]
+    run_at = db.save_scout_searches(conn, first)
+    assert run_at is not None
+    assert db.get_scout_searches(conn, run_at) == first
+    assert db.get_scout_searches(conn, "1999-01-01T00:00:00+00:00") == []
+    positions = [r[0] for r in conn.execute("SELECT position FROM scout_searches ORDER BY id")]
+    assert positions == [0, 1]
+
+
+def test_save_scout_searches_with_no_stats_writes_nothing(conn):
+    assert db.save_scout_searches(conn, []) is None
+    assert conn.execute("SELECT COUNT(*) FROM scout_searches").fetchone()[0] == 0
+
+
 def test_get_draftable_candidates_excludes_skipped_sent_and_over_limit(conn):
     candidates = [_candidate(c) for c in ("a", "b", "c", "d")]
     db.insert_candidates(conn, candidates)
