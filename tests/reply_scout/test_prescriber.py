@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -721,8 +722,9 @@ def test_draft_top_candidates_passes_log_through(monkeypatch, conn):
     db.set_ranking(conn, [("a", 0.9, 1)])
     seen = {}
 
-    def _fake_generate(candidate, match, model="m", log=None):
+    def _fake_generate(candidate, match, model="m", log=None, conn=None):
         seen["log"] = log
+        seen["conn"] = conn
         log.append("空応答: @usera 1回目 stop_reason=max_tokens")
         return [prescriber.PLACEHOLDER_EMPTY, prescriber.PLACEHOLDER_EMPTY]
 
@@ -732,4 +734,98 @@ def test_draft_top_candidates_passes_log_through(monkeypatch, conn):
 
     assert count == 1
     assert seen["log"] is log
+    assert seen["conn"] is conn
     assert log == ["空応答: @usera 1回目 stop_reason=max_tokens"]
+
+
+def _discard_rows(conn):
+    return conn.execute(
+        "SELECT candidate_id, attempt, variant, filters, reaction_head"
+        " FROM discarded_reactions ORDER BY id"
+    ).fetchall()
+
+
+def test_discarded_reaction_is_saved_as_one_row_with_head_only(monkeypatch, conn):
+    """破棄した案1つにつき1行、候補ID・試行回数・何案目・フィルタ名・先頭20字を残す。
+    ログ行（戻り値のlogとlogger.warning）はこれまで通り出る。"""
+    match = _find_match("テストホースイチが強かった")
+    long_bad = "Q&A形式で読みやすいです。ローシャムパークは期待してただけに、結果は謙虚に受け止めます"
+    _patch_responses(monkeypatch, [
+        _FakeResponseWithStop(
+            json.dumps({"reactions": ["いい馬ですよね", long_bad]}, ensure_ascii=False), "end_turn"
+        ),
+        _FakeResponseWithStop('{"reactions": ["気になる存在です"]}', "end_turn"),
+    ])
+    log: list[str] = []
+    drafts = prescriber.generate_drafts(_candidate("c1", "x"), match, log=log, conn=conn)
+
+    assert _discard_rows(conn) == [("c1", 1, 2, '["自分の評価"]', long_bad[:20])]
+    assert log == ["フィルタで破棄: @userc1 1回目 自分の評価「Q&A形式で読みやすいです。ローシャムパ…」"]
+    assert [d.replace(match.fact_sentence, "").strip() for d in drafts] == [
+        "いい馬ですよね", "気になる存在です",
+    ]
+
+
+def test_discarded_reaction_with_multiple_filters_saves_every_filter_name(monkeypatch, conn):
+    match = _find_match("テストホースイチが強かった")
+    bad = '{"reactions": ["自分も高く見てたので今回は完全に見立て違いでした", "いい馬ですよね"]}'
+    _patch_responses(monkeypatch, [
+        _FakeResponseWithStop(bad, "end_turn"),
+        _FakeResponseWithStop('{"reactions": ["気になる存在です"]}', "end_turn"),
+    ])
+    prescriber.generate_drafts(_candidate("c1", "x"), match, conn=conn)
+
+    rows = _discard_rows(conn)
+    assert len(rows) == 1
+    assert json.loads(rows[0][3]) == ["一致の主張", "自分の評価"]
+
+
+def test_draft_top_candidates_records_discards_across_attempts(monkeypatch, conn):
+    """draft_top_candidates()は自分のconnをそのまま渡すので、本番経路でも記録される。"""
+    db.insert_candidates(conn, [_candidate("a", "テストホースイチが強かった")])
+    db.set_ranking(conn, [("a", 0.9, 1)])
+    bad = '{"reactions": ["ずっと期待してたので嬉しいです", "この的中率は見習いたいです"]}'
+    _patch_responses(monkeypatch, [_FakeResponseWithStop(bad, "end_turn")])
+    assert prescriber.draft_top_candidates(account=None, conn=conn, cfg=_cfg(), log=[]) == 1
+
+    assert _discard_rows(conn) == [
+        ("a", 1, 1, '["自分の評価"]', "ずっと期待してたので嬉しいです"),
+        ("a", 1, 2, '["数字の称賛"]', "この的中率は見習いたいです"),
+        ("a", 2, 1, '["自分の評価"]', "ずっと期待してたので嬉しいです"),
+        ("a", 2, 2, '["数字の称賛"]', "この的中率は見習いたいです"),
+    ]
+
+
+def test_discard_record_failure_does_not_stop_generation(monkeypatch, conn, caplog):
+    """DBへの記録が失敗しても下書きは作られ、失敗はlogger.warningにだけ残る。"""
+    match = _find_match("テストホースイチが強かった")
+    _patch_responses(monkeypatch, [
+        _FakeResponseWithStop('{"reactions": ["自分も近い見立てでした", "いい馬ですよね"]}', "end_turn"),
+        _FakeResponseWithStop('{"reactions": ["気になる存在です"]}', "end_turn"),
+    ])
+
+    def _boom(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(db, "save_discarded_reaction", _boom)
+    log: list[str] = []
+    with caplog.at_level("WARNING", logger=prescriber.logger.name):
+        drafts = prescriber.generate_drafts(_candidate("c1", "x"), match, log=log, conn=conn)
+
+    assert [d.replace(match.fact_sentence, "").strip() for d in drafts] == [
+        "いい馬ですよね", "気になる存在です",
+    ]
+    # 戻り値のログ行は従来どおり。記録失敗はlogger側だけ
+    assert log == ["フィルタで破棄: @userc1 1回目 一致の主張「自分も近い見立てでした」"]
+    assert any("破棄の記録に失敗" in r.getMessage() for r in caplog.records)
+    assert any(r.getMessage() == log[0] for r in caplog.records)
+
+
+def test_generate_drafts_without_conn_records_nothing(monkeypatch, conn):
+    match = _find_match("テストホースイチが強かった")
+    _patch_responses(monkeypatch, [
+        _FakeResponseWithStop('{"reactions": ["自分も近い見立てでした", "いい馬ですよね"]}', "end_turn"),
+        _FakeResponseWithStop('{"reactions": ["気になる存在です"]}', "end_turn"),
+    ])
+    prescriber.generate_drafts(_candidate("c1", "x"), match)
+    assert _discard_rows(conn) == []

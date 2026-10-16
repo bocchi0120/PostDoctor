@@ -7,6 +7,7 @@ posts.db とは別ファイル）。storage/db.py と同じ connect()/init_db()
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -103,6 +104,15 @@ CREATE TABLE IF NOT EXISTS scout_searches (
     dropped_known           INTEGER NOT NULL,  -- 既にcandidatesにあったID
     dropped_low_engagement  INTEGER NOT NULL,  -- min_likes/min_replies未満
     dropped_duplicate       INTEGER NOT NULL   -- 同じ実行の前の検索語で既に拾っていたID
+);
+CREATE TABLE IF NOT EXISTS discarded_reactions (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id   TEXT NOT NULL,
+    attempt        INTEGER NOT NULL,  -- generate_drafts()の何回目の試行か(1始まり)
+    variant        INTEGER NOT NULL,  -- その試行の応答の何案目か(1始まり)。drafts.variantとは別物
+    filters        TEXT NOT NULL,     -- 該当した破棄フィルタ名のJSON配列(フィルタの定義順)
+    reaction_head  TEXT NOT NULL,     -- 破棄した反応文の先頭20字(全文は残さない)
+    recorded_at    TEXT NOT NULL
 );
 """
 
@@ -329,6 +339,35 @@ def save_drafts(
             """,
             (candidate_id, variant, text, generated_at, predictions_hash),
         )
+    conn.commit()
+
+
+def save_discarded_reaction(
+    conn: sqlite3.Connection,
+    candidate_id: str,
+    attempt: int,
+    variant: int,
+    filters: list[str],
+    reaction_head: str,
+) -> None:
+    """破棄フィルタで落とした反応文1案を記録する。
+
+    「フィルタで破棄: …」のログ行は、常駐serve(pythonw)では出力先が無く捨てられ、
+    どのフィルタが何を落としたかを後から数えられなかった（2026-10-16）ための記録。
+    下書きを作り直すとdraftsの行は消える運用なので、draftsとは別テーブルにする。
+    filtersはjson_each()で集計できるようJSON配列で持つ。
+    """
+    conn.execute(
+        """
+        INSERT INTO discarded_reactions
+          (candidate_id, attempt, variant, filters, reaction_head, recorded_at)
+        VALUES (?,?,?,?,?,?)
+        """,
+        (
+            candidate_id, attempt, variant, json.dumps(filters, ensure_ascii=False),
+            reaction_head, _utc_now_iso(),
+        ),
+    )
     conn.commit()
 
 

@@ -232,3 +232,40 @@ def test_delete_from_drafts_does_not_touch_sent_replies(conn):
     sent_replies_left = conn.execute("SELECT COUNT(*) FROM sent_replies").fetchone()[0]
     assert drafts_left == 0
     assert sent_replies_left == 1
+
+
+def test_init_db_adds_discarded_reactions_to_existing_db_without_touching_other_tables():
+    """discarded_reactionsが無い既存DBでも、init_db()でテーブルが足され、既存の行は残る。"""
+    connection = sqlite3.connect(":memory:")
+    db.init_db(connection)
+    db.insert_candidates(connection, [_candidate("keep")])
+    db.save_drafts(connection, "keep", ["案1", "案2"])
+    connection.execute("DROP TABLE discarded_reactions")
+    connection.commit()
+
+    db.init_db(connection)
+    cols = {row[1] for row in connection.execute("PRAGMA table_info(discarded_reactions)").fetchall()}
+    assert cols == {
+        "id", "candidate_id", "attempt", "variant", "filters", "reaction_head", "recorded_at",
+    }
+    assert connection.execute("SELECT id FROM candidates").fetchall() == [("keep",)]
+    assert connection.execute("SELECT draft_text FROM drafts ORDER BY variant").fetchall() == [
+        ("案1",), ("案2",),
+    ]
+    connection.close()
+
+
+def test_save_discarded_reaction_stores_filters_as_json_array(conn):
+    db.save_discarded_reaction(conn, "c1", 2, 1, ["一致の主張", "自分の評価"], "自分も高く見てたので今回は完全に見立")
+    row = conn.execute(
+        "SELECT candidate_id, attempt, variant, filters, reaction_head, recorded_at"
+        " FROM discarded_reactions"
+    ).fetchone()
+    assert row[:5] == ("c1", 2, 1, '["一致の主張", "自分の評価"]', "自分も高く見てたので今回は完全に見立")
+    assert datetime.fromisoformat(row[5]).utcoffset().total_seconds() == 0
+    # フィルタ名ごとの件数はjson_each()で数えられる
+    counts = conn.execute(
+        "SELECT f.value, COUNT(*) FROM discarded_reactions, json_each(filters) AS f"
+        " GROUP BY f.value ORDER BY f.value"
+    ).fetchall()
+    assert sorted(counts) == sorted([("一致の主張", 1), ("自分の評価", 1)])

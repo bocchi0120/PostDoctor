@@ -505,7 +505,18 @@
   破棄の判定と再試行回数は変えていない。回帰テスト:
   `test_discard_reasons_names_every_matching_filter`、
   `test_discard_log_shows_filter_names_and_truncated_head_not_full_text`ほか）。
+  2026-10-16: このログ行は常駐serve(pythonw)では出力先が無く捨てられていたため、破棄1案に
+  つき1行を`reply_scout.db`の`discarded_reactions`テーブルにも記録するようにした
+  （`db.save_discarded_reaction()`、`prescriber._record_discard()`。候補ID・試行回数・応答の
+  何案目か・該当フィルタ名のJSON配列・先頭20字・記録日時）。draftsへの列追加にしなかったのは、
+  破棄された案はdraftsの行にならず（1候補で複数回・複数案ありうる）、下書き再生成で
+  draftsの行は消える運用のため。記録の失敗は生成を止めずlogger.warningのみ。ログ行は従来どおり。
+  回帰テスト: `test_discarded_reaction_is_saved_as_one_row_with_head_only`、
+  `test_discarded_reaction_with_multiple_filters_saves_every_filter_name`、
+  `test_discard_record_failure_does_not_stop_generation`ほか。
   残り: 実測をためてから、プロンプトの調整か再試行回数（現在1回）の見直しを判断する。
+  フィルタ名ごとの件数は`SELECT f.value, COUNT(*) FROM discarded_reactions,
+  json_each(filters) AS f GROUP BY f.value`で数える。
 - run_track / 返信取得への読み取り上限（track_read_limit）
 - 時制ミスマッチの近傍判定(b)（実例が貯まってから）
 - 1投稿に複数の該当馬(◎〇▲等)が言及されている場合の優先cite選択（4-9節の修正後も残る別課題。

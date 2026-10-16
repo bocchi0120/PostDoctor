@@ -132,7 +132,7 @@ _DISCARD_FILTERS = (
     ("数字の称賛", NUMBER_PRAISE_RE),
 )
 _DISCARD_RES = tuple(regex for _name, regex in _DISCARD_FILTERS)
-LOG_REACTION_HEAD_LEN = 20  # ログに出す反応文の先頭文字数（全文は長いので出さない）
+LOG_REACTION_HEAD_LEN = 20  # ログ・DBに残す反応文の先頭文字数（全文は長いので残さない）
 
 
 def _discard_reasons(reaction: str) -> list[str]:
@@ -226,9 +226,15 @@ def _build_user_prompt(candidate: Candidate, reaction_budget: int, category: str
 
 
 @dataclass(frozen=True)
+class _Discard:
+    variant: int   # 応答の何案目か(1始まり)
+    reaction: str  # 破棄した反応文（全文。ログ・DBには先頭だけ出す）
+
+
+@dataclass(frozen=True)
 class _CallResult:
     reactions: list[str]      # フィルタを通過した案
-    discarded: tuple[str, ...] = ()  # 破棄した案ごとの説明（該当フィルタ名＋先頭の数文字）
+    discarded: tuple[_Discard, ...] = ()  # 破棄した案
     problem: str | None = None  # 案を1つも読み取れなかった理由: "empty" / "unparsable"
     stop_reason: str | None = None
 
@@ -265,9 +271,9 @@ def _call_claude(
     # 多重防御: 数字・マーク、相手の予想との一致・不一致の主張、自分の過去の評価の主張、
     # 相手の数字の称賛が混入した案は、文字を削って繋げるのではなく案ごと破棄する
     # （不自然な文になることを避け、確定していない事実が紛れ込む余地を構造的に無くす）。
-    reactions = [r for r in reactions if r]
-    kept = [r for r in reactions if _reaction_is_acceptable(r)]
-    discarded = tuple(_describe_discard(r) for r in reactions if not _reaction_is_acceptable(r))
+    numbered = [(i, r) for i, r in enumerate(reactions, start=1) if r]
+    kept = [r for _i, r in numbered if _reaction_is_acceptable(r)]
+    discarded = tuple(_Discard(i, r) for i, r in numbered if not _reaction_is_acceptable(r))
     return _CallResult(kept, discarded=discarded, stop_reason=stop_reason)
 
 
@@ -279,16 +285,32 @@ def _report(log: list[str] | None, line: str) -> None:
         log.append(line)
 
 
+def _record_discard(conn, candidate_id: str, attempt: int, discard: _Discard) -> None:
+    """破棄した案をDB(discarded_reactions)に残す。ログ行はpythonwのserveでは捨てられるため。
+    記録は集計用の副産物なので、書き込みに失敗しても下書き生成は止めずwarningだけ残す。"""
+    if conn is None:
+        return
+    try:
+        db.save_discarded_reaction(
+            conn, candidate_id, attempt, discard.variant,
+            _discard_reasons(discard.reaction), discard.reaction[:LOG_REACTION_HEAD_LEN],
+        )
+    except Exception as e:
+        logger.warning(f"破棄の記録に失敗: {candidate_id} {attempt}回目 {discard.variant}案目 {e!r}")
+
+
 def generate_drafts(
     candidate: Candidate,
     match: PredictionMatch,
     model: str = "claude-sonnet-5",
     log: list[str] | None = None,
+    conn=None,
 ) -> list[str]:
     """matchはNoneであってはならない（呼び出し側でNoneならこの関数自体を呼ばないこと）。
 
     2案そろわなければ1回だけ再試行し、それでも足りない分は原因別のプレースホルダで埋める。
     空応答・破棄があった試行は、何回目か・stop_reasonとともにlogへ追記する。
+    connを渡すと、破棄した案をdiscarded_reactionsにも記録する。
     """
     if _client() is None:
         return [PLACEHOLDER, PLACEHOLDER]
@@ -305,8 +327,9 @@ def generate_drafts(
             _report(
                 log, f"解析できない応答: {who} {attempt}回目 stop_reason={result.stop_reason}"
             )
-        for description in result.discarded:
-            _report(log, f"フィルタで破棄: {who} {attempt}回目 {description}")
+        for discard in result.discarded:
+            _report(log, f"フィルタで破棄: {who} {attempt}回目 {_describe_discard(discard.reaction)}")
+            _record_discard(conn, candidate.id, attempt, discard)
         discarded += len(result.discarded)
         for r in result.reactions:
             if r not in reactions:
@@ -361,7 +384,9 @@ def draft_top_candidates(
             db.set_prediction_status(conn, ranked.candidate.id, status)
             continue
         db.clear_prediction_status(conn, ranked.candidate.id)
-        drafts = generate_drafts(ranked.candidate, match, model=cfg.claude_model, log=log)
+        drafts = generate_drafts(
+            ranked.candidate, match, model=cfg.claude_model, log=log, conn=conn
+        )
         db.save_drafts(conn, ranked.candidate.id, drafts, predictions_hash=predictions_hash)
         count += 1
     return count
