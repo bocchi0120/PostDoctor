@@ -396,3 +396,20 @@ def test_fetch_reply_responses_stops_issuing_queries_once_max_read_exhausted(mon
 
     assert read_count == 1
     assert len(fake_client.queries) == 1
+
+
+def test_load_config_candidate_max_age_days_defaults_to_seven_and_can_be_overridden(
+    tmp_path, monkeypatch
+):
+    keywords_path = tmp_path / "keywords.json"
+    monkeypatch.setattr(fetcher, "KEYWORDS_PATH", keywords_path)
+    monkeypatch.setattr(fetcher, "NG_WORDS_PATH", tmp_path / "missing_ng.json")
+    monkeypatch.setattr(fetcher, "ANALYSIS_TERMS_PATH", tmp_path / "missing_analysis.json")
+
+    keywords_path.write_text(json.dumps({"keywords": ["競馬"]}), encoding="utf-8")
+    assert fetcher.load_config().candidate_max_age_days == 7 == fetcher.DEFAULT_CANDIDATE_MAX_AGE_DAYS
+
+    keywords_path.write_text(
+        json.dumps({"keywords": ["競馬"], "candidate_max_age_days": 3}), encoding="utf-8"
+    )
+    assert fetcher.load_config().candidate_max_age_days == 3

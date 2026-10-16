@@ -26,6 +26,11 @@ ANALYSIS_TERMS_PATH = ROOT_DIR / "config" / "analysis_terms.json"
 
 TWEET_READ_COST = 0.005
 USER_READ_COST = 0.010
+# X API v2のrecent searchが返すのは直近7日分。それより古い候補は取り込み時点の
+# いいね数のまま速度が0に近づくだけで、レース名入りなら具体性の点だけで上位に
+# 残り続けた（2026-10-16、7/15の投稿がTOP10にいた）ため、ランキング対象をこの範囲に揃える。
+# config/keywords.jsonの"candidate_max_age_days"で上書きできる。
+DEFAULT_CANDIDATE_MAX_AGE_DAYS = 7
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,8 @@ class ScoutConfig:
     # 正式名称(または通称) -> 検索に使う表記のリスト。複数ならOR検索1回にまとめる
     race_aliases: dict[str, list[str]] = field(default_factory=dict)
     rakuba_cancelled_races_path: str = ""
+    # ランキング対象にする候補の投稿からの日数（orchestrator.run_scout()）
+    candidate_max_age_days: int = DEFAULT_CANDIDATE_MAX_AGE_DAYS
 
 
 MIN_RESULTS_PER_QUERY = 10   # X API v2 recent search の max_results 下限
@@ -105,6 +112,9 @@ def load_config() -> ScoutConfig:
         max_graded_races=int(auto.get("max_races", 4)),
         race_aliases=_normalize_aliases(raw.get("race_aliases", {})),
         rakuba_cancelled_races_path=raw.get("rakuba_cancelled_races_path", ""),
+        candidate_max_age_days=int(
+            raw.get("candidate_max_age_days", DEFAULT_CANDIDATE_MAX_AGE_DAYS)
+        ),
     )
 
 

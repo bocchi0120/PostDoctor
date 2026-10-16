@@ -269,3 +269,43 @@ def test_save_discarded_reaction_stores_filters_as_json_array(conn):
         " GROUP BY f.value ORDER BY f.value"
     ).fetchall()
     assert sorted(counts) == sorted([("一致の主張", 1), ("自分の評価", 1)])
+
+
+def test_load_scoring_candidates_excludes_posts_older_than_cutoff_without_deleting(conn):
+    """posted_sinceより古い候補はランキング対象から外すだけで、行は消さない。"""
+    old = _candidate("old")
+    fresh = Candidate(
+        id="fresh", text="t", author_id="a-f", author_screen_name="userf",
+        created_at="2026-10-15T12:00:00+09:00", likes=1, retweets=0, replies=0, quotes=0,
+        keyword="競馬",
+    )
+    db.insert_candidates(conn, [old, fresh])
+    since = datetime.fromisoformat("2026-10-09T19:00:00+09:00")
+
+    assert [c.id for c in db.load_scoring_candidates(conn, since)] == ["fresh"]
+    # 引数なしは従来どおり未送信の全件
+    assert sorted(c.id for c in db.load_scoring_candidates(conn)) == ["fresh", "old"]
+    assert sorted(r[0] for r in conn.execute("SELECT id FROM candidates")) == ["fresh", "old"]
+
+
+def test_load_scoring_candidates_cutoff_compares_instants_across_offsets(conn):
+    """境界はUTC/JSTの表記の違いではなく時刻そのもので比べる。境界ちょうどは対象に含める。"""
+    db.insert_candidates(conn, [_candidate("edge")])  # 2026-07-21T00:00:00+09:00
+    since_utc = datetime.fromisoformat("2026-07-20T15:00:00+00:00")  # 同じ時刻
+    assert [c.id for c in db.load_scoring_candidates(conn, since_utc)] == ["edge"]
+    later = datetime.fromisoformat("2026-07-20T15:00:01+00:00")
+    assert db.load_scoring_candidates(conn, later) == []
+
+
+def test_load_scoring_candidates_cutoff_excludes_missing_or_unreadable_created_at(conn):
+    """投稿日時が空・読めない候補は新しさを確かめられないので対象外（行は残る）。"""
+    db.insert_candidates(conn, [_candidate("empty"), _candidate("broken"), _candidate("naive")])
+    conn.execute("UPDATE candidates SET created_at='' WHERE id='empty'")
+    conn.execute("UPDATE candidates SET created_at='7月21日' WHERE id='broken'")
+    conn.execute("UPDATE candidates SET created_at='2026-07-21T00:00:00' WHERE id='naive'")
+    conn.commit()
+    since = datetime.fromisoformat("2026-07-20T00:00:00+09:00")
+
+    # オフセット無しはJSTとして読む（candidates.created_atはJSTで保存する約束）
+    assert [c.id for c in db.load_scoring_candidates(conn, since)] == ["naive"]
+    assert conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0] == 3

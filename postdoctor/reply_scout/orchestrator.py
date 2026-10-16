@@ -67,6 +67,9 @@ def run_scout(account: Account) -> list[str]:
     race_names = frozenset(prediction_data.all_race_names(prediction_rows))
     keyword_groups = scout_keyword_groups(cfg, pcfg, datetime.now(JST).date())
 
+    # recent searchが返す範囲（直近cfg.candidate_max_age_days日）より古い候補はランキング対象外
+    posted_since = datetime.now(JST) - timedelta(days=cfg.candidate_max_age_days)
+
     search_stats: list[db.SearchStat] = []
     with db.connect(account) as conn:
         candidates, read_count, searched = fetcher.collect_candidates(
@@ -77,7 +80,7 @@ def run_scout(account: Account) -> list[str]:
         if read_count:
             db.add_usage(conn, "tweet_read", read_count)
 
-        pending = db.load_scoring_candidates(conn)
+        pending = db.load_scoring_candidates(conn, posted_since)
         prelim = analyzer.preliminary_score(pending, cfg, horse_names, race_names)
         top_author_ids = list({c.author_id for c, _ in prelim[: cfg.top_user_lookup_limit]})
         followers = fetcher.enrich_followers(account, top_author_ids) if top_author_ids else {}
@@ -85,7 +88,7 @@ def run_scout(account: Account) -> list[str]:
             db.update_followers(conn, followers)
             db.add_usage(conn, "user_read", len(followers))
 
-        pending = db.load_scoring_candidates(conn)
+        pending = db.load_scoring_candidates(conn, posted_since)
         ranked = analyzer.final_ranking(pending, cfg, horse_names, race_names, top_n=10)
         db.set_ranking(conn, [(c.id, score, rank) for c, score, rank, _breakdown in ranked])
         for c, _score, _rank, breakdown in ranked:

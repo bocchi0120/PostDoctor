@@ -242,8 +242,8 @@ def all_race_names(rows: list[HorseRow]) -> set[str]:
 CATEGORY_HIT = "的中系"            # 高評価 かつ 好走(3着以内)
 CATEGORY_MISS_HIGH = "見込み違い系"  # 高評価・上位評価 だが 凡走（着順が評価順位より下）
 CATEGORY_MISS_LOW = "完敗系"        # 低評価 だが 好走（評価を覆された）
-CATEGORY_AS_EXPECTED = "順当系"     # 低評価 かつ 凡走、または上位評価で着順が評価順位以内（評価通り）
-CATEGORY_NEUTRAL = "中立系"        # 上位評価 かつ 好走（的中とも評価を覆されたとも言わない）
+CATEGORY_AS_EXPECTED = "順当系"     # 低評価で着順が評価順位と同じか下、または上位評価で着順が評価順位以内（評価通り）
+CATEGORY_NEUTRAL = "中立系"        # 上位評価 かつ 好走、または低評価で好走でないが着順が評価順位より上
 
 HIGH_EVAL_MAX_PRED_RANK = 3     # 3番手評価以内を「高評価」とみなす
 GOOD_RESULT_MAX_CHAKUJUN = 3     # 3着以内を「好走」とみなす
@@ -283,6 +283,10 @@ def _classify(pred_rank: int, chakujun: int, field_size: int | None = None) -> s
     # - 凡走でも着順が評価順位以内(14頭中5番手→5着) → 順当系(評価通り)
     # - 好走 → 中立系。的中系にはしない(5番手評価の馬の勝利を的中のように語ると
     #   水増しになる)。完敗系にもしない(上位に見ていた馬なので「大きく上回った」は言い過ぎ)。
+    #
+    # 低評価の帯で好走(3着以内)でない場合、以前は着順を見ずに一律「評価通り」で、
+    # 16頭中14番手評価→4着のように評価を上回った結果まで「評価通り」と書いていた
+    # (2026-10-16)。着順が評価順位より上なら中立系、同じか下なら順当系にする。
     high_eval = 1 <= pred_rank <= HIGH_EVAL_MAX_PRED_RANK
     upper_eval = HIGH_EVAL_MAX_PRED_RANK < pred_rank <= upper_eval_max_pred_rank(field_size)
     good_result = 1 <= chakujun <= GOOD_RESULT_MAX_CHAKUJUN
@@ -292,7 +296,9 @@ def _classify(pred_rank: int, chakujun: int, field_size: int | None = None) -> s
         if good_result:
             return CATEGORY_NEUTRAL
         return CATEGORY_MISS_HIGH if chakujun > pred_rank else CATEGORY_AS_EXPECTED
-    return CATEGORY_MISS_LOW if good_result else CATEGORY_AS_EXPECTED
+    if good_result:
+        return CATEGORY_MISS_LOW
+    return CATEGORY_NEUTRAL if chakujun < pred_rank else CATEGORY_AS_EXPECTED
 
 
 def _build_fact_sentence(

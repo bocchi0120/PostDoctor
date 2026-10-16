@@ -11,7 +11,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterator
 
 from postdoctor.config import Account
@@ -284,8 +284,31 @@ def update_followers(conn: sqlite3.Connection, followers_by_author: dict[str, in
     conn.commit()
 
 
-def load_scoring_candidates(conn: sqlite3.Connection) -> list[Candidate]:
-    """未ランク付け（rankがNULL、かつstatusが未送信）の候補を返す。"""
+_JST = timezone(timedelta(hours=9))
+
+
+def _posted_since(created_at: str | None, since: datetime) -> bool:
+    """投稿日時がsince以降か。日時が無い・読めない候補は新しさを確かめられないのでFalse
+    （古い投稿に確定済みの結果を返す方向の誤りを避ける。行は残るので後から確認できる）。"""
+    if not created_at:
+        return False
+    try:
+        posted = datetime.fromisoformat(created_at)
+    except ValueError:
+        return False
+    if posted.tzinfo is None:
+        posted = posted.replace(tzinfo=_JST)  # candidates.created_atはJSTで保存している
+    return posted >= since
+
+
+def load_scoring_candidates(
+    conn: sqlite3.Connection, posted_since: datetime | None = None
+) -> list[Candidate]:
+    """ランキング対象の候補（statusが未送信のもの。rankの有無は問わない）を返す。
+
+    posted_sinceを渡すと、投稿日時がそれ以降の候補だけに絞る（それより古い候補の行は
+    消さず、ランキングの対象から外すだけ）。投稿日時が無い・読めない候補も外す。
+    """
     rows = conn.execute(
         """
         SELECT id, text, author_id, author_screen_name, author_followers,
@@ -301,6 +324,7 @@ def load_scoring_candidates(conn: sqlite3.Connection) -> list[Candidate]:
             replies=r[8], quotes=r[9], keyword=r[10], is_quote=bool(r[11]),
         )
         for r in rows
+        if posted_since is None or _posted_since(r[5], posted_since)
     ]
 
 

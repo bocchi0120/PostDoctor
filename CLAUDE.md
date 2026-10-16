@@ -110,7 +110,8 @@ crossed with good/bad placing) with distinct templates and a matching Claude ton
 category (proud-but-modest / humble-acknowledge-miss / humble-outdone / matter-of-fact / neutral).
 Evaluation bands: rank ≤3 = high; rank 4..`max(3, ceil(field_size/3))` = upper (a miss only if it
 finished below its predicted rank; a top-3 finish gets the neutral template, never "hit"); the rest
-= low. See `docs/design_decisions.md` §4 item 15.
+= low (a top-3 finish = "outdone"; otherwise "as expected" only if it finished at or below its
+predicted rank, else neutral). See `docs/design_decisions.md` §4 items 15 and 19.
 
 **Matching is horse-name-only** — a race-name-only fallback to Rakuba's own top pick was tried and
 removed, because it produced citations disconnected from what the poster actually said (e.g.
@@ -167,8 +168,9 @@ instead.
   `credential_prefix`).
 - `config/keywords.json` — reply_scout search keywords, `daily_read_limit`, `min_likes`,
   `top_user_lookup_limit`, `draft_top_n`, `claude_model`, `rakuba_output_dir` (path to Rakuba's
-  `backend/output/`), `trusted_authors`. `draft_top_n` must be kept in sync with the dashboard's
-  display count (`top_n=10`, hardcoded in `orchestrator.run_scout()`) — there is no shared constant
+  `backend/output/`), `trusted_authors`, optional `candidate_max_age_days` (default 7 = X recent
+  search's window; older candidates are kept in the DB but excluded from ranking). `draft_top_n`
+  must be kept in sync with the dashboard's display count (`top_n=10`, hardcoded in `orchestrator.run_scout()`) — there is no shared constant
   enforcing this. `trusted_authors` starts curated (not empty) as of 2026-08-03; add an account only
   once it has (a) actually replied to one of our sent replies (`other_reply_count>0`, surfaced via
   the dashboard's unacknowledged-reply alert) or (b) produced impressions on `score_review.csv`

@@ -336,6 +336,30 @@
     `tests/reply_scout/test_orchestrator.py`の
     `test_run_draft_appends_generation_problems_to_log`。
 
+19. **古い候補がTOP10に居座り、レース前の投稿に確定結果を返していた（2026-10-16発覚）**:
+    `db.load_scoring_candidates()`は`status='未送信'`だけで候補を集め、投稿日時で絞って
+    いなかった（docstringの「rankがNULL」も実装と食い違っていた）。速度は取り込み時点の
+    いいね数÷経過時間なので古い投稿ほど0に近づくが、具体性(0.25)などは時間に関係なく
+    加点されるため、7/15以降のレース名入りの投稿がTOP10の8枠を占めていた。うち8/10投稿の
+    札幌記念の候補（レース前の投稿だが「予想」等の語が無く時制防御を素通り）には、
+    「結果が楽しみです」＋「結果も4着と評価通りでした」という時制の食い違った下書きが付いていた。
+    → 修正: ランキング対象を投稿から`candidate_max_age_days`日以内（既定7日、X recent searchの
+    範囲。`fetcher.DEFAULT_CANDIDATE_MAX_AGE_DAYS`、`config/keywords.json`で上書き可）に限る
+    （`db.load_scoring_candidates(conn, posted_since)`、`orchestrator.run_scout()`）。行は消さず、
+    次のscoutで`set_ranking()`がrankをNULLにするだけ。投稿日時が空・読めない候補は新しさを
+    確かめられないので対象外にする（古い投稿に結果を返す方向の誤りを避ける）。
+    同時に見つかった分類のずれ: 低評価の帯は好走(3着以内)かどうかだけで分けており、16頭中
+    14番手評価→4着（ローシャムパーク）が「評価通り」になっていた。好走でない結果のうち、
+    着順が評価順位より上なら中立系（「結果はN着でした」）、同じか下なら順当系にした
+    （`prediction_data._classify()`。高評価・上位評価の帯と好走側は変更なし）。
+    回帰テスト: `test_load_scoring_candidates_excludes_posts_older_than_cutoff_without_deleting`、
+    `test_load_scoring_candidates_cutoff_excludes_missing_or_unreadable_created_at`、
+    `test_run_scout_ranks_only_posts_within_max_age_days`、
+    `test_low_eval_not_good_result_but_better_than_pred_rank_is_neutral_rosham_park`、
+    `test_classify_low_eval_band_compares_finish_with_pred_rank`ほか。
+    残り: 既存の未送信下書きは古いロジックのまま（再生成は未実施）。時制防御がレース前の
+    投稿を見逃した件（「予想」等の語が無い投稿）は別課題として未対応。
+
 ## 5. スコアリング・候補選定の判断
 
 - NGワードは2リスト: 煽り系（スコア半減）と勧誘・宣伝系「限定/有料/教える等」（ハード除外）。

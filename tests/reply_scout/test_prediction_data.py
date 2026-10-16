@@ -716,3 +716,42 @@ def test_graded_race_keywords_rolling_file_overrides_snapshot(tmp_path):
         _race("R1", "20261004", "新名称", "B"),
     ])
     assert _graded(tmp_path, date(2026, 10, 5)) == [("新名称",)]
+
+
+def test_low_eval_not_good_result_but_better_than_pred_rank_is_neutral_rosham_park():
+    """ローシャムパーク(2026-08-16札幌記念)の実例の回帰テスト: 16頭中14番手評価で4着は
+    評価を上回っているので「評価通り」と書かず、中立の文面にする。"""
+    horse = _horse("ローシャムパーク", "札幌記念", 16, 14)
+    sentence, category = pd._build_fact_sentence(horse, "△", 4)
+    assert category == pd.CATEGORY_NEUTRAL
+    assert "16頭中14番手評価としていて、結果は4着でした。" in sentence
+    assert "評価通り" not in sentence
+
+
+@pytest.mark.parametrize(
+    "pred_rank, chakujun, field_size, expected",
+    [
+        # 低評価・好走でない: 着順が評価順位より上 -> 中立系
+        (14, 4, 16, pd.CATEGORY_NEUTRAL),
+        (14, 13, 16, pd.CATEGORY_NEUTRAL),
+        (7, 4, 18, pd.CATEGORY_NEUTRAL),
+        # 低評価・好走でない: 着順が評価順位と同じか下 -> 順当系（低評価が当たった形）
+        (14, 14, 16, pd.CATEGORY_AS_EXPECTED),
+        (14, 16, 16, pd.CATEGORY_AS_EXPECTED),
+        (7, 17, 18, pd.CATEGORY_AS_EXPECTED),
+        (4, 4, None, pd.CATEGORY_AS_EXPECTED),  # 頭数不明なら4番手は低評価
+        # 低評価・好走 -> 完敗系（変更なし）
+        (14, 3, 16, pd.CATEGORY_MISS_LOW),
+        (7, 1, 18, pd.CATEGORY_MISS_LOW),
+        # 上位評価・高評価の帯は変更なし
+        (6, 4, 18, pd.CATEGORY_AS_EXPECTED),
+        (6, 17, 18, pd.CATEGORY_MISS_HIGH),
+        (5, 1, 16, pd.CATEGORY_NEUTRAL),
+        (3, 4, 18, pd.CATEGORY_MISS_HIGH),
+        (3, 3, 18, pd.CATEGORY_HIT),
+    ],
+)
+def test_classify_low_eval_band_compares_finish_with_pred_rank(
+    pred_rank, chakujun, field_size, expected
+):
+    assert pd._classify(pred_rank, chakujun, field_size) == expected

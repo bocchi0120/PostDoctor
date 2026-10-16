@@ -230,3 +230,36 @@ def test_run_draft_appends_generation_problems_to_log(tmp_path, monkeypatch):
     log = orchestrator.run_draft(account)
     assert log[0].startswith("3件の候補に下書きを生成しました")
     assert log[1:] == ["空応答: @someone 1回目 stop_reason=max_tokens"]
+
+
+def test_run_scout_ranks_only_posts_within_max_age_days(tmp_path, monkeypatch):
+    """candidate_max_age_days日より古い候補はランキングされない（rank=NULL）が、行は残る。"""
+    from dataclasses import replace
+    from datetime import datetime, timedelta
+
+    account = _account(tmp_path, monkeypatch)
+    now = datetime.now(orchestrator.JST)
+    with db.connect(account) as conn:
+        db.insert_candidates(conn, [
+            db.Candidate(
+                id=cid, text="競馬の話", author_id=f"a-{cid}", author_screen_name=cid,
+                created_at=(now - timedelta(days=age)).isoformat(), likes=10, retweets=0,
+                replies=0, quotes=0, keyword="競馬",
+            )
+            for cid, age in [("fresh", 1), ("edge", 2.9), ("old", 3.1)]
+        ])
+    monkeypatch.setattr(
+        fetcher, "load_config", lambda: replace(_cfg(daily_read_limit=50), candidate_max_age_days=3)
+    )
+    monkeypatch.setattr(orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("重賞",)])
+    monkeypatch.setattr(
+        fetcher, "collect_candidates", lambda account, conn, cfg, groups, stats=None: ([], 0, [])
+    )
+    monkeypatch.setattr(fetcher, "enrich_followers", lambda account, ids: {})
+
+    log = orchestrator.run_scout(account)
+    assert log[-1] == "TOP2件を選定しました。"
+    with db.connect(account) as conn:
+        ranks = dict(conn.execute("SELECT id, rank FROM candidates").fetchall())
+    assert ranks["old"] is None
+    assert {ranks["fresh"], ranks["edge"]} == {1, 2}
