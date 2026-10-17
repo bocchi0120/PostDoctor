@@ -13,9 +13,12 @@ reply_scout（リプライ営業支援）の候補収集・下書き生成・反
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from postdoctor.analysis.heatmap import METRICS, add_derived_columns, make_heatmap
 from postdoctor.config import Account
@@ -27,6 +30,28 @@ from postdoctor.reply_scout import orchestrator as rs_orchestrator
 from postdoctor.storage.db import connect, get_since_id, load_posts_df, set_since_id, upsert_posts
 
 VALID_REPLY_SCOUT_STATUSES = {"未送信", "送信済み", "見送り"}
+
+# serveはコンソールの無いpythonwで常駐するので、logging（prescriberの「フィルタで破棄」
+# 「破棄の記録に失敗」等のwarning）はどこにも出ず捨てられていた（2026-10-16）。
+# 警告以上をアカウントのデータ置き場（data/はgitignore済み）のファイルに残す。
+LOG_MAX_BYTES = 1_000_000
+LOG_BACKUP_COUNT = 3
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def serve_log_path(account: Account) -> Path:
+    """data/<account>/logs/serve.log"""
+    return account.data_dir / "logs" / "serve.log"
+
+
+def configure_file_logging(log_path: Path) -> RotatingFileHandler:
+    """警告以上をlog_pathへ、1MB×3世代のローテーション付きで出す（root loggerに設定）。"""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        log_path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
+    )
+    logging.basicConfig(level=logging.WARNING, format=LOG_FORMAT, handlers=[handler], force=True)
+    return handler
 
 
 def _run_pipeline(account: Account) -> list[str]:
@@ -160,6 +185,7 @@ def _make_handler(account: Account) -> type[BaseHTTPRequestHandler]:
 
 
 def serve(account: Account, port: int = 8765, open_browser: bool = True) -> None:
+    configure_file_logging(serve_log_path(account))
     df = add_derived_columns(load_posts_df(account))
     text = generate_prescription(df, account)
     generate_dashboard(df, account, text)

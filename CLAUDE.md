@@ -159,6 +159,10 @@ confirm which account/interpreter it's running), stop it, and relaunch the same 
 `venv\Scripts\pythonw.exe`. Always re-check `netstat` after relaunching — `Start-Process` can
 return before the OS confirms the new bind, and two processes can end up racing for the port.
 
+`pythonw` has no console, so `serve` writes `logging` output of WARNING and above to
+`data/<account>/logs/serve.log` (gitignored; rotated at 1MB, 3 backups — `server.configure_file_logging()`).
+That is where reply_scout's warnings (e.g. `フィルタで破棄`, `破棄の記録に失敗`) end up in production.
+
 Note: the venv's `pythonw.exe` launcher may spawn the *base* Python install's `pythonw.exe` as a
 child process (visible in `Get-Process`/`Get-CimInstance` as the system Python's path, not the
 venv's) — this is expected on this machine and does not by itself mean packages are missing; the
