@@ -91,6 +91,11 @@ score — those come from Rakuba's real data only, assembled by plain Python str
    from `'予測データ未投入'` = no horse-name match at all). Known accepted false-positive: the
    keyword scan covers the whole post, so a post mixing retrospective content with an unrelated
    forward-looking question can false-skip a good citation — accepted trade-off, not fixed.
+   Also hard-skipped under the same status: a race that is *not yet concluded* but whose post time
+   (`kaisai_date`+`start_time`, JST, compared with the current time — not the post's time) has
+   passed, i.e. the result is pending (weekend results arrive in Monday's batch). No drafts row is
+   written, so the next `draft` run re-evaluates it and cites the result once it lands. Races with
+   an unknown `start_time` are not judged (snapshots lacking it are backfilled from `race_info.csv`).
 3. **Staleness defense**: `prediction_data.compute_predictions_signature()` hashes all of Rakuba's
    prediction files; `db.save_drafts()` stores that hash per draft row. If Rakuba's predictions
    change after a draft was generated (e.g. a horse's post-position gets confirmed and the pick

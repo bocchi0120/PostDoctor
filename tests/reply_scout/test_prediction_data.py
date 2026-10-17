@@ -755,3 +755,140 @@ def test_classify_low_eval_band_compares_finish_with_pred_rank(
     pred_rank, chakujun, field_size, expected
 ):
     assert pd._classify(pred_rank, chakujun, field_size) == expected
+
+
+# --- 発走済み・結果待ちの判定 ---------------------------------------------------
+
+def _write_rakuba_dir(tmp_path, races, snapshot_races=None, race_info_rows=None, results_rows=None):
+    """predictions.json(+スナップショット)・race_info.csv・race_results.csvを持つ仮のRakuba出力。"""
+    out = tmp_path / "rakuba_output"
+    out.mkdir()
+    (out / "predictions.json").write_text(
+        json.dumps({"generated_at": "x", "n_races": len(races), "races": races}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    if snapshot_races is not None:
+        (out / "predictions_20260801.json").write_text(
+            json.dumps({"races": snapshot_races}, ensure_ascii=False), encoding="utf-8"
+        )
+    if race_info_rows is not None:
+        lines = ["race_key,kaisai_date,start_time,race_name"]
+        lines += [f"{k},{d},{t},{n}" for k, d, t, n in race_info_rows]
+        (out / "race_info.csv").write_text("﻿" + "\n".join(lines) + "\n", encoding="utf-8")
+    lines = ["race_key,uma_code,uma_num,chakujun"]
+    lines += [f"{k},{u},{n},{c}" for k, u, n, c in (results_rows or [])]
+    (out / "race_results.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return pd.load_prediction_config(str(out))
+
+
+def _started_race(race_key, kaisai_date, start_time=None, horse="シュガークン", pred_rank=8):
+    race = {
+        "race_key": race_key, "kaisai_date": kaisai_date, "jyo_name": "東京", "race_num": "11",
+        "distance": 1600, "race_name": "富士ステークス",
+        "horses": [
+            {"pred_rank": pred_rank, "uma_num": 13, "uma_code": "U1", "uma_name": horse, "score": 0.1},
+            {"pred_rank": 1, "uma_num": 1, "uma_code": "U2", "uma_name": "ベツノウマデス", "score": 0.9},
+        ],
+    }
+    if start_time is not None:
+        race["start_time"] = start_time
+    return race
+
+
+def test_load_all_predictions_reads_start_time_and_backfills_from_race_info(tmp_path):
+    """predictions.jsonのstart_timeを読み、無いスナップショットはrace_info.csvで補う。
+    race_info.csvにも無いレースは""のまま。先頭ゼロ("0955")は壊さない。"""
+    pcfg = _write_rakuba_dir(
+        tmp_path,
+        races=[_started_race("R_NEW", "20261017", start_time="1545")],
+        snapshot_races=[
+            _started_race("R_OLD", "20260801", horse="フルイウマデス"),
+            _started_race("R_UNKNOWN", "20260801", horse="ナゾノウマデス"),
+        ],
+        race_info_rows=[("R_OLD", "20260801", "0955", "x"), ("R_NEW", "20261017", "9999", "x")],
+    )
+    starts = {(h.race_key, h.uma_code): h.start_time for h in pd.load_all_predictions(pcfg)}
+    assert starts[("R_NEW", "U1")] == "1545"  # predictions.jsonの値が優先
+    assert starts[("R_OLD", "U1")] == "0955"
+    assert starts[("R_UNKNOWN", "U1")] == ""
+
+
+def test_load_all_predictions_without_race_info_keeps_empty_start_time(tmp_path):
+    pcfg = _write_rakuba_dir(tmp_path, races=[_started_race("R1", "20261017")])
+    assert {h.start_time for h in pd.load_all_predictions(pcfg)} == {""}
+
+
+@pytest.mark.parametrize(
+    "kaisai_date, start_time, now, expected",
+    [
+        ("20261017", "1545", "2026-10-17T15:45:00+09:00", True),   # 発走時刻ちょうどは発走済み
+        ("20261017", "1545", "2026-10-17T15:44:59+09:00", False),
+        ("20261017", "1545", "2026-10-17T06:45:00+00:00", True),   # UTCで渡しても同じ時刻
+        ("20261017", "1545", "2026-10-17T15:50:00", True),          # タイムゾーン無しはJST
+        ("20261017", "", "2026-10-18T12:00:00+09:00", False),       # 発走時刻不明は判定しない
+        ("20261017", "15:45", "2026-10-18T12:00:00+09:00", False),  # 形式が違えば判定しない
+        ("", "1545", "2026-10-18T12:00:00+09:00", False),
+    ],
+)
+def test_has_started_compares_jst_start_with_now(kaisai_date, start_time, now, expected):
+    horse = pd.HorseRow(
+        race_key="R", kaisai_date=kaisai_date, jyo_name="東京", race_num="11", race_name="x",
+        distance=1600, pred_rank=1, uma_num=1, uma_code="U", uma_name="ウマ", score=0.0,
+        start_time=start_time,
+    )
+    assert pd.has_started(horse, pd.datetime.fromisoformat(now)) is expected
+
+
+def _rows_results(pcfg):
+    rows = pd.load_all_predictions(pcfg)
+    results = pd.load_race_results(pcfg)
+    return rows, results, pd.confirmed_race_keys(results)
+
+
+_SUGAR_TEXT = "シュガークン号騎乗の吉村騎手は中央重賞4勝目。単勝配当4160円"
+
+
+def test_find_match_skips_started_race_whose_result_is_pending_sugar_kun(tmp_path):
+    """シュガークン(2026-10-17富士S)の実例の回帰テスト: 発走(15:45)後で、結果の行が
+    chakujun=0のプレースホルダだけなら、「…評価としています」と返さず結果待ちで見送る。"""
+    pcfg = _write_rakuba_dir(
+        tmp_path, races=[_started_race("R1", "20261017", start_time="1545")],
+        results_rows=[("R1", "U1", 13, 0), ("R1", "U2", 1, 0)],
+    )
+    rows, results, confirmed = _rows_results(pcfg)
+    after = pd.datetime.fromisoformat("2026-10-17T17:48:00+09:00")
+    m, reason = pd.find_match(_SUGAR_TEXT, rows, results, confirmed, now=after)
+    assert m is None
+    assert reason == pd.REASON_RESULT_PENDING
+
+
+def test_find_match_before_start_or_without_now_keeps_pre_race_sentence(tmp_path):
+    pcfg = _write_rakuba_dir(tmp_path, races=[_started_race("R1", "20261017", start_time="1545")])
+    rows, results, confirmed = _rows_results(pcfg)
+    before = pd.datetime.fromisoformat("2026-10-17T15:00:00+09:00")
+    for kwargs in ({"now": before}, {}):
+        m, reason = pd.find_match(_SUGAR_TEXT, rows, results, confirmed, **kwargs)
+        assert reason is None
+        assert m.fact_sentence.endswith("8番手評価としています。")
+
+
+def test_find_match_started_race_with_unknown_start_time_is_not_skipped(tmp_path):
+    pcfg = _write_rakuba_dir(tmp_path, races=[_started_race("R1", "20261017")])
+    rows, results, confirmed = _rows_results(pcfg)
+    later = pd.datetime.fromisoformat("2026-10-20T12:00:00+09:00")
+    m, reason = pd.find_match(_SUGAR_TEXT, rows, results, confirmed, now=later)
+    assert reason is None and m is not None
+
+
+def test_find_match_started_and_confirmed_race_cites_result(tmp_path):
+    """結果が入れば（chakujun>0の行がある）、発走済みでも結果付きの文面になる。"""
+    pcfg = _write_rakuba_dir(
+        tmp_path, races=[_started_race("R1", "20261017", start_time="1545")],
+        results_rows=[("R1", "U1", 13, 1), ("R1", "U2", 1, 5)],
+    )
+    rows, results, confirmed = _rows_results(pcfg)
+    later = pd.datetime.fromisoformat("2026-10-19T15:00:00+09:00")
+    m, reason = pd.find_match(_SUGAR_TEXT, rows, results, confirmed, now=later)
+    assert reason is None
+    assert m.chakujun == 1
+    assert "結果は1着" in m.fact_sentence

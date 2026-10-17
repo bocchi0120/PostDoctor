@@ -29,6 +29,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 
 from postdoctor.config import Account
 from postdoctor.reply_scout import db, prediction_data
@@ -360,6 +361,9 @@ def draft_top_candidates(
 
     Rakuba予測データに一致しない候補は生成をハードスキップし
     （Claude API呼び出しゼロ）、prediction_status='予測データ未投入'として記録する。
+    一致したレースが確定済みでレース前の投稿、または発走済みで結果の取り込み待ちの
+    場合は'時制スキップ'として記録する。どちらも下書きの行は作らないので、次回の実行で
+    再判定される（結果が入れば結果付きの文面で作られる）。
     """
     pcfg = prediction_data.load_prediction_config(cfg.rakuba_output_dir)
     predictions = prediction_data.load_all_predictions(pcfg)
@@ -367,18 +371,22 @@ def draft_top_candidates(
     confirmed = prediction_data.confirmed_race_keys(results)
     predictions_hash = prediction_data.compute_predictions_signature(pcfg)
 
+    now = datetime.now(prediction_data.JST)
+
     count = 0
     for ranked in db.get_draftable_candidates(conn, cfg.draft_top_n):
         if ranked.drafts:
             continue
         match, skip_reason = prediction_data.find_match(
             ranked.candidate.text, predictions, results, confirmed,
-            created_at=ranked.candidate.created_at,
+            created_at=ranked.candidate.created_at, now=now,
         )
         if match is None:
             status = (
                 db.PREDICTION_STATUS_TIME_MISMATCH
-                if skip_reason == prediction_data.REASON_TIME_MISMATCH
+                if skip_reason in (
+                    prediction_data.REASON_TIME_MISMATCH, prediction_data.REASON_RESULT_PENDING
+                )
                 else db.PREDICTION_STATUS_NO_MATCH
             )
             db.set_prediction_status(conn, ranked.candidate.id, status)

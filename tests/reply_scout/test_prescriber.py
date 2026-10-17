@@ -829,3 +829,52 @@ def test_generate_drafts_without_conn_records_nothing(monkeypatch, conn):
     ])
     prescriber.generate_drafts(_candidate("c1", "x"), match)
     assert _discard_rows(conn) == []
+
+
+
+def test_draft_top_candidates_records_result_pending_as_time_skip_and_retries_later(
+    monkeypatch, conn, tmp_path
+):
+    """発走済み・結果待ちは「時制スキップ」として記録し、下書きの行は作らない（Claudeも
+    呼ばない）。結果が入った後の実行で再判定され、結果付きの文面で作られる。"""
+    from dataclasses import replace
+    from datetime import datetime, timedelta
+
+    out = tmp_path / "rakuba_output"
+    out.mkdir()
+    yesterday = (datetime.now(prediction_data.JST) - timedelta(days=1)).strftime("%Y%m%d")
+    race = {
+        "race_key": "R1", "kaisai_date": yesterday, "jyo_name": "東京", "race_num": "11",
+        "distance": 1600, "race_name": "富士ステークス", "start_time": "1545",
+        "horses": [
+            {"pred_rank": 8, "uma_num": 13, "uma_code": "U1", "uma_name": "シュガークン", "score": 0.1},
+            {"pred_rank": 1, "uma_num": 1, "uma_code": "U2", "uma_name": "ベツノウマデス", "score": 0.9},
+        ],
+    }
+    (out / "predictions.json").write_text(
+        json.dumps({"races": [race]}, ensure_ascii=False), encoding="utf-8"
+    )
+    results_path = out / "race_results.csv"
+    results_path.write_text("race_key,uma_code,uma_num,chakujun\nR1,U1,13,0\nR1,U2,1,0\n", encoding="utf-8")
+    cfg = replace(_cfg(), rakuba_output_dir=str(out))
+
+    db.insert_candidates(conn, [_candidate("s", "シュガークン号騎乗の吉村騎手は中央重賞4勝目")])
+    db.set_ranking(conn, [("s", 0.9, 1)])
+    calls = _patch_responses(
+        monkeypatch,
+        [_FakeResponseWithStop('{"reactions": ["いい馬ですよね", "気になる存在です"]}', "end_turn")],
+    )
+
+    assert prescriber.draft_top_candidates(account=None, conn=conn, cfg=cfg, log=[]) == 0
+    assert calls == []
+    assert conn.execute("SELECT COUNT(*) FROM drafts").fetchone()[0] == 0
+    assert conn.execute("SELECT prediction_status FROM candidates WHERE id='s'").fetchone()[0] == (
+        db.PREDICTION_STATUS_TIME_MISMATCH
+    )
+
+    # 月曜の一括配信で結果が入った後の実行
+    results_path.write_text("race_key,uma_code,uma_num,chakujun\nR1,U1,13,1\nR1,U2,1,5\n", encoding="utf-8")
+    assert prescriber.draft_top_candidates(account=None, conn=conn, cfg=cfg, log=[]) == 1
+    texts = [r[0] for r in conn.execute("SELECT draft_text FROM drafts ORDER BY variant")]
+    assert len(texts) == 2 and all("結果は1着" in t for t in texts)
+    assert conn.execute("SELECT prediction_status FROM candidates WHERE id='s'").fetchone()[0] is None

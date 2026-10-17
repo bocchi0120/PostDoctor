@@ -102,3 +102,23 @@ def test_unacknowledged_responses_section_omits_overdue_flag_within_48h(tmp_path
     section = generator._unacknowledged_responses_section(account)
     assert "未対応の返信 1件" in section
     assert "早めの返信推奨" not in section
+
+
+
+def test_time_skip_card_explains_result_pending_after_start(tmp_path, monkeypatch):
+    account = _account(tmp_path, monkeypatch)
+    with rs_db.connect(account) as conn:
+        rs_db.insert_candidates(conn, [
+            rs_db.Candidate(
+                id="c1", text="本文", author_id="a1", author_screen_name="poster",
+                created_at="2026-10-17T17:18:46+09:00", likes=1, retweets=0, replies=0, quotes=0,
+                keyword="競馬",
+            )
+        ])
+        rs_db.set_ranking(conn, [("c1", 0.5, 1)])
+        rs_db.set_prediction_status(conn, "c1", rs_db.PREDICTION_STATUS_TIME_MISMATCH)
+        ranked = rs_db.get_top_candidates(conn)[0]
+
+    card = generator._reply_scout_candidate_card(account, ranked, None)
+    assert "時制スキップ" in card
+    assert "発走済みで結果の取り込み待ち" in card

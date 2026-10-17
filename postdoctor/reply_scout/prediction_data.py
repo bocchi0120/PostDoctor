@@ -1,7 +1,7 @@
 """予測データ層: Rakubaプロジェクト（C:\\Projects\\Rakuba）の実際の予測出力を読む。
 
 reply_scoutの他の層（fetcher/db/analyzer/prescriber）と並ぶ層として、Rakubaの
-生データ形式（predictions.json・predictions_YYYYMMDD.json・race_results.csv）を
+生データ形式（predictions.json・predictions_YYYYMMDD.json・race_results.csv・race_info.csv）を
 知っているのはこのファイルだけにする。
 
 出力ディレクトリが存在しない・読めない・壊れている場合は、例外を投げず空の結果
@@ -21,13 +21,15 @@ import hashlib
 import json
 import re
 import unicodedata
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 SNAPSHOT_RE = re.compile(r"predictions_(\d{8})\.json")
 ROLLING_FILENAME = "predictions.json"
 RESULTS_FILENAME = "race_results.csv"
+RACE_INFO_FILENAME = "race_info.csv"
+JST = timezone(timedelta(hours=9))
 
 MARKS = ["◎", "〇", "▲"]
 FACT_CHARS_RE = re.compile(r"[0-9◎〇△×▲]")
@@ -38,6 +40,7 @@ class PredictionConfig:
     output_dir: Path
     rolling_filename: str = ROLLING_FILENAME
     results_filename: str = RESULTS_FILENAME
+    race_info_filename: str = RACE_INFO_FILENAME
 
 
 def load_prediction_config(rakuba_output_dir: str) -> PredictionConfig:
@@ -61,6 +64,9 @@ class HorseRow:
     # (枠順未確定のプレースホルダ)が混ざっていれば頭数を確定できないのでNone
     # (確定済みの馬だけ数えると実際より少ない頭数を断定してしまうため)。
     field_size: int | None = None
+    # 発走時刻 "HHMM"（JST）。predictions.jsonのrace.start_time。古いスナップショットには
+    # 無いので、load_all_predictions()がrace_info.csvで補う。分からなければ""。
+    start_time: str = ""
 
 
 def _race_label(horse: HorseRow) -> str:
@@ -98,6 +104,7 @@ def _horses_from_race(race: dict) -> list[HorseRow]:
                 uma_name=str(h.get("uma_name", "")),
                 score=float(h.get("score") or 0.0),
                 field_size=field_size,
+                start_time=str(race.get("start_time") or ""),
             )
         )
     return rows
@@ -138,7 +145,56 @@ def load_all_predictions(pcfg: PredictionConfig) -> list[HorseRow]:
         for row in _load_prediction_file(rolling_path):
             merged[(row.race_key, row.uma_code)] = row
 
-    return list(merged.values())
+    rows = list(merged.values())
+    if any(not r.start_time for r in rows):
+        start_times = load_race_start_times(pcfg)
+        rows = [
+            replace(r, start_time=start_times.get(r.race_key, "")) if not r.start_time else r
+            for r in rows
+        ]
+    return rows
+
+
+def load_race_start_times(pcfg: PredictionConfig) -> dict[str, str]:
+    """race_info.csvの race_key -> start_time("HHMM")。古いスナップショットには発走時刻が
+    無いので、その補完に使う。文字列のまま読む（"0955"の先頭ゼロを壊さないため）。"""
+    path = pcfg.output_dir / pcfg.race_info_filename
+    if not path.exists():
+        return {}
+    start_times: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                race_key = row.get("race_key", "")
+                start_time = (row.get("start_time") or "").strip()
+                if race_key and start_time:
+                    start_times[race_key] = start_time
+    except (OSError, csv.Error):
+        return {}
+    return start_times
+
+
+def race_start_at(horse: HorseRow) -> datetime | None:
+    """kaisai_date＋start_timeを発走日時(JST)にする。どちらかが欠けている・読めなければNone。"""
+    if len(horse.start_time) != 4 or not horse.start_time.isdigit():
+        return None
+    try:
+        return datetime.strptime(horse.kaisai_date + horse.start_time, "%Y%m%d%H%M").replace(
+            tzinfo=JST
+        )
+    except ValueError:
+        return None
+
+
+def has_started(horse: HorseRow, now: datetime) -> bool:
+    """nowの時点で発走時刻を過ぎているか。発走日時が分からないレースはFalse（判定しない）。
+    nowにタイムゾーンが無ければJSTとみなす。"""
+    start = race_start_at(horse)
+    if start is None:
+        return False
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=JST)
+    return now >= start
 
 
 def compute_predictions_signature(pcfg: PredictionConfig) -> str | None:
@@ -459,6 +515,9 @@ def _horse_name_matches(h: HorseRow, candidate_text: str) -> bool:
 # 「一致はしたが時制ミスマッチで見送った」のかを区別するため）。
 REASON_NO_MATCH = "no_match"
 REASON_TIME_MISMATCH = "time_mismatch"
+# 発走済みだが結果がまだ取り込まれていない（土日のレースは月曜昼の一括配信まで確定しない）。
+# 「…評価としています」とレース前の言い方で返すとレース後の投稿と食い違うので見送る。
+REASON_RESULT_PENDING = "result_pending"
 
 
 def _parse_kaisai_date(value: str) -> date | None:
@@ -521,6 +580,7 @@ def find_match(
     results: dict[str, dict[str, dict]],
     confirmed: set[str],
     created_at: str | None = None,
+    now: datetime | None = None,
 ) -> tuple[PredictionMatch | None, str | None]:
     """candidate_textに実在の馬名が含まれるかを調べ、あれば事実文を確定させる。
 
@@ -529,7 +589,8 @@ def find_match(
     無関係な引用になりがちなため）。
 
     戻り値は (PredictionMatch|None, 不一致理由|None) のタプル。マッチした場合は
-    (match, None)。しなかった場合は (None, REASON_NO_MATCH | REASON_TIME_MISMATCH)。
+    (match, None)。しなかった場合は
+    (None, REASON_NO_MATCH | REASON_TIME_MISMATCH | REASON_RESULT_PENDING)。
 
     1. 既知の馬名（2文字以上）が本文に部分一致するものを探す。3文字以下の
        短い馬名は誤マッチしやすいため、レース名または開催場名との共起も必須とする。
@@ -543,6 +604,10 @@ def find_match(
        ※このキーワード判定は投稿全体を見るため、過去の話と別の未来レースの話が
        混在する投稿では過検知になり得る（既知の制約。実例が増えたら馬名/レース名
        の近傍判定への改善を検討する）。
+    4. nowを渡した場合、一致したレースが未確定で、now時点で発走時刻を過ぎていれば
+       (None, REASON_RESULT_PENDING) を返す（結果の取り込み待ち。比べるのは投稿日時では
+       なく現在時刻: レース前の投稿でも、発走後に「…評価としています」と返すのは不自然）。
+       発走時刻が分からないレースはこの判定をしない。nowを省略した場合も判定しない。
     """
     horse_candidates = [
         h for h in horses if len(h.uma_name) >= 2 and _horse_name_matches(h, candidate_text)
@@ -563,6 +628,8 @@ def find_match(
 
     if concluded and _is_pre_race_framing(candidate_text):
         return None, REASON_TIME_MISMATCH
+    if not concluded and now is not None and has_started(chosen, now):
+        return None, REASON_RESULT_PENDING
 
     chakujun: int | None = None
     if concluded:

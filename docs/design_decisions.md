@@ -360,6 +360,25 @@
     残り: 既存の未送信下書きは古いロジックのまま（再生成は未実施）。時制防御がレース前の
     投稿を見逃した件（「予想」等の語が無い投稿）は別課題として未対応。
 
+20. **発走後・結果取り込み前のレースに、レース前の言い方で返していた（2026-10-17発覚）**:
+    @horsedatacの投稿（10/17 17:18、富士Sでシュガークンが勝った後の「中央重賞4勝目」
+    「単勝4160円」）に、17:48生成の下書きが「14頭中8番手評価としています。」と返していた。
+    富士Sの`race_results.csv`の行はchakujun=0のプレースホルダだけで未確定（土日の結果は
+    月曜昼の一括配信）。時制の判定は確定済みのレースにしか働かず、発走時刻は読んですらいなかった。
+    → 修正: `HorseRow.start_time`（predictions.jsonの`race.start_time`。古いスナップショットに
+    無い分は`race_info.csv`で補う。本番では欠けていた324レースすべてを補えた）と
+    `prediction_data.has_started()`を追加。`find_match(..., now=)`は、未確定で現在時刻が
+    発走時刻を過ぎていれば`(None, REASON_RESULT_PENDING)`を返し、`draft_top_candidates()`が
+    既存の「時制スキップ」として記録する（新しいステータス値は作らない。ダッシュボードの説明文に
+    「発走済みで結果の取り込み待ち」を追加）。比べるのは投稿日時ではなく現在時刻（レース前の
+    投稿でも、発走後に「…評価としています」と返すのは不自然なため）。下書きの行は作らないので、
+    結果が入った後の実行で再判定され、結果付きの文面で作られる。発走時刻が分からないレースと、
+    `now`を省略した呼び出しは判定しない。既存の下書き（drafts.id 461/462）は自動では直らない。
+    回帰テスト: `test_find_match_skips_started_race_whose_result_is_pending_sugar_kun`、
+    `test_draft_top_candidates_records_result_pending_as_time_skip_and_retries_later`、
+    `test_load_all_predictions_reads_start_time_and_backfills_from_race_info`、
+    `test_has_started_compares_jst_start_with_now`ほか。
+
 ## 5. スコアリング・候補選定の判断
 
 - NGワードは2リスト: 煽り系（スコア半減）と勧誘・宣伝系「限定/有料/教える等」（ハード除外）。
