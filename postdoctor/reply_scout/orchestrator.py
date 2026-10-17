@@ -44,6 +44,28 @@ def scout_keyword_groups(
     return groups
 
 
+def relevancy_keyword_groups(
+    cfg: fetcher.ScoutConfig, pcfg: prediction_data.PredictionConfig, today: date
+) -> set[tuple[str, ...]]:
+    """関連度順(sort_order=relevancy)で検索する表記の組: 自動キーワードのうち当週末の重賞だけ。
+
+    試験運用（2026-10-17）。前週末の重賞と固定語（「重賞」等）は従来どおり新しい順。
+    新しい順だと発走前後の短時間に投稿が集中する当週末の重賞で、いいね等の少ない直近の
+    投稿ばかりを読んでしまうので、反応の付いた投稿が上に来る並びを試す。
+    """
+    if not cfg.auto_graded_races:
+        return set()
+    cancelled = Path(cfg.rakuba_cancelled_races_path) if cfg.rakuba_cancelled_races_path else None
+    plan = prediction_data.graded_race_keyword_plan(
+        pcfg, today,
+        cancelled_path=cancelled,
+        aliases=cfg.race_aliases,
+        grades=cfg.graded_grades,
+        max_races=cfg.max_graded_races,
+    )
+    return {variants for variants, current_weekend in plan if current_weekend}
+
+
 def _search_stat_summary(stat: db.SearchStat) -> str:
     """「毎日王冠 読取10→保存2（いいね等不足7・既知1）」。落とした理由は0件のものを省く。"""
     reasons = [
@@ -56,7 +78,8 @@ def _search_stat_summary(stat: db.SearchStat) -> str:
         if n
     ]
     detail = f"（{'・'.join(reasons)}）" if reasons else ""
-    return f"{stat.keyword} 読取{stat.read_count}→保存{stat.saved_count}{detail}"
+    order = "[関連度順]" if stat.sort_order == db.SORT_RELEVANCY else ""
+    return f"{stat.keyword}{order} 読取{stat.read_count}→保存{stat.saved_count}{detail}"
 
 
 def run_scout(account: Account) -> list[str]:
@@ -65,7 +88,9 @@ def run_scout(account: Account) -> list[str]:
     prediction_rows = prediction_data.load_all_predictions(pcfg)
     horse_names = frozenset(prediction_data.all_horse_names(prediction_rows))
     race_names = frozenset(prediction_data.all_race_names(prediction_rows))
-    keyword_groups = scout_keyword_groups(cfg, pcfg, datetime.now(JST).date())
+    today = datetime.now(JST).date()
+    keyword_groups = scout_keyword_groups(cfg, pcfg, today)
+    relevancy_groups = relevancy_keyword_groups(cfg, pcfg, today)
 
     # recent searchが返す範囲（直近cfg.candidate_max_age_days日）より古い候補はランキング対象外
     posted_since = datetime.now(JST) - timedelta(days=cfg.candidate_max_age_days)
@@ -73,7 +98,8 @@ def run_scout(account: Account) -> list[str]:
     search_stats: list[db.SearchStat] = []
     with db.connect(account) as conn:
         candidates, read_count, searched = fetcher.collect_candidates(
-            account, conn, cfg, keyword_groups, stats=search_stats
+            account, conn, cfg, keyword_groups, stats=search_stats,
+            relevancy_groups=relevancy_groups,
         )
         inserted = db.insert_candidates(conn, candidates) if candidates else 0
         db.save_scout_searches(conn, search_stats)

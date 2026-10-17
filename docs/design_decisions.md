@@ -253,6 +253,16 @@
     見送り（2026-10-13）: 通称の自動生成（〜カップ→C、冠名の自動除去）、counts APIでの
     表記ゆれ確認、`sort_order="relevancy"`、検索語の削減。まず`scout_searches`の実測を
     数回分ためてから判断する。
+    2026-10-17: 実測2回（10/16・10/17）とも、読み取り50件のうち保存は3件で、当週末の重賞
+    （秋華賞・富士S）は2回とも10件すべてがいいね等不足だった。新しい順では発走前後に集中する
+    直近の投稿ばかり読むため、`sort_order="relevancy"`を**当週末の重賞（自動キーワード）だけ**で
+    試す（`orchestrator.relevancy_keyword_groups()`、`prediction_data.graded_race_keyword_plan()`、
+    `fetcher.collect_candidates(relevancy_groups=)`）。前週末の重賞と固定語（「重賞」等）は
+    従来どおりsort_orderを送らない（API既定のrecency）。読み取り上限・1検索語10件・min_likesは
+    変えていない。並び順は`scout_searches.sort_order`に残し（列追加前の行はNULL=新しい順）、
+    実行ログでは「富士S[関連度順] 読取10→保存…」と出す。比べ方:
+    `SELECT COALESCE(sort_order,'recency'), SUM(read_count), SUM(saved_count) FROM scout_searches
+    GROUP BY 1`。数回分ためて、保存率が上がらなければ戻す。
 
 17. **反応文に、データに無い主張が入り込む（2026-10-13発覚）**: 過去の反応文351件
     （現行DB＋バックアップ、重複除去）を全件確認し、既存の2フィルタ（数字・マーク、一致主張）を

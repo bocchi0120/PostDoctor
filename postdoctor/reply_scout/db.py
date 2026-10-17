@@ -103,7 +103,8 @@ CREATE TABLE IF NOT EXISTS scout_searches (
     saved_count             INTEGER NOT NULL,  -- 新規候補として保存した件数
     dropped_known           INTEGER NOT NULL,  -- 既にcandidatesにあったID
     dropped_low_engagement  INTEGER NOT NULL,  -- min_likes/min_replies未満
-    dropped_duplicate       INTEGER NOT NULL   -- 同じ実行の前の検索語で既に拾っていたID
+    dropped_duplicate       INTEGER NOT NULL,  -- 同じ実行の前の検索語で既に拾っていたID
+    sort_order              TEXT               -- X APIのsort_order。NULLはこの列の追加前(=API既定のrecency)
 );
 CREATE TABLE IF NOT EXISTS discarded_reactions (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,6 +128,12 @@ _CANDIDATES_MIGRATIONS = [
 # draftsテーブルへの追加カラム。predictions_hashは下書き生成時点のRakuba予測データの
 # 指紋（prediction_data.compute_predictions_signature()）。表示・送信済み操作時に
 # 現在の指紋と突き合わせて「予測更新あり」警告を出すために使う。
+# scout_searchesへの追加カラム。関連度順(sort_order=relevancy)の試験で、どの検索語が
+# どちらの並びで読まれたかを後から分けて数えるため（2026-10-17）。
+_SCOUT_SEARCHES_MIGRATIONS = [
+    ("sort_order", "ALTER TABLE scout_searches ADD COLUMN sort_order TEXT"),
+]
+
 _DRAFTS_MIGRATIONS = [
     ("predictions_hash", "ALTER TABLE drafts ADD COLUMN predictions_hash TEXT"),
 ]
@@ -148,6 +155,10 @@ class Candidate:
     is_quote: bool = False
 
 
+SORT_RECENCY = "recency"  # X API recent searchのsort_orderの既定値（新しい順）
+SORT_RELEVANCY = "relevancy"
+
+
 @dataclass(frozen=True)
 class SearchStat:
     """scoutの検索1回分の内訳。read_count = saved + dropped_* の合計になる。"""
@@ -160,6 +171,7 @@ class SearchStat:
     dropped_known: int
     dropped_low_engagement: int
     dropped_duplicate: int
+    sort_order: str = SORT_RECENCY  # X APIのsort_order（"recency"=新しい順 / "relevancy"=関連度順）
 
 
 @dataclass(frozen=True)
@@ -185,6 +197,15 @@ def init_db(conn: sqlite3.Connection) -> None:
     existing_draft_cols = {row[1] for row in conn.execute("PRAGMA table_info(drafts)").fetchall()}
     for column_name, alter_sql in _DRAFTS_MIGRATIONS:
         if column_name not in existing_draft_cols:
+            try:
+                conn.execute(alter_sql)
+            except sqlite3.OperationalError:
+                pass  # 並行接続で他プロセスが既に追加済みの場合がある
+    existing_search_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(scout_searches)").fetchall()
+    }
+    for column_name, alter_sql in _SCOUT_SEARCHES_MIGRATIONS:
+        if column_name not in existing_search_cols:
             try:
                 conn.execute(alter_sql)
             except sqlite3.OperationalError:
@@ -247,13 +268,13 @@ def save_scout_searches(conn: sqlite3.Connection, stats: list[SearchStat]) -> st
         """
         INSERT INTO scout_searches
           (run_at, position, keyword, query, max_results, read_count, saved_count,
-           dropped_known, dropped_low_engagement, dropped_duplicate)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
+           dropped_known, dropped_low_engagement, dropped_duplicate, sort_order)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
         """,
         [
             (
                 run_at, i, s.keyword, s.query, s.max_results, s.read_count, s.saved_count,
-                s.dropped_known, s.dropped_low_engagement, s.dropped_duplicate,
+                s.dropped_known, s.dropped_low_engagement, s.dropped_duplicate, s.sort_order,
             )
             for i, s in enumerate(stats)
         ],
@@ -263,14 +284,16 @@ def save_scout_searches(conn: sqlite3.Connection, stats: list[SearchStat]) -> st
 
 
 def get_scout_searches(conn: sqlite3.Connection, run_at: str) -> list[SearchStat]:
-    """指定した実行(run_at)の検索内訳を検索順に返す。"""
+    """指定した実行(run_at)の検索内訳を検索順に返す。sort_order列の追加前の行(NULL)は、
+    sort_orderを送っていなかった(=API既定の新しい順)ので"recency"として返す。"""
     rows = conn.execute(
         """
         SELECT keyword, query, max_results, read_count, saved_count,
-               dropped_known, dropped_low_engagement, dropped_duplicate
+               dropped_known, dropped_low_engagement, dropped_duplicate,
+               COALESCE(sort_order, ?)
         FROM scout_searches WHERE run_at = ? ORDER BY position ASC
         """,
-        (run_at,),
+        (SORT_RECENCY, run_at),
     ).fetchall()
     return [SearchStat(*r) for r in rows]
 

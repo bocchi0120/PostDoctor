@@ -12,6 +12,7 @@ DB へのアクセスは行わず、正規化した Candidate のリストを返
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import timedelta, timezone
 
@@ -131,6 +132,7 @@ def collect_candidates(
     cfg: ScoutConfig,
     keyword_groups: list[tuple[str, ...]] | None = None,
     stats: list[db.SearchStat] | None = None,
+    relevancy_groups: Collection[tuple[str, ...]] = (),
 ) -> tuple[list[db.Candidate], int, list[tuple[str, int]]]:
     """キーワード検索で新規候補を集める。
 
@@ -146,6 +148,10 @@ def collect_candidates(
 
     stats: リストを渡すと、検索1回ごとの内訳（読み取り・保存・落とした理由別の件数）を
     追記する。記録用で、検索や候補の選別には影響しない。
+
+    relevancy_groups: ここに含まれる表記の組だけ sort_order=relevancy（関連度順）で検索する。
+    それ以外は sort_order を送らない（API既定の recency=新しい順。従来どおりのリクエスト）。
+    読み取り件数の割り振り・min_likes等の選別は並び順によらず同じ。
     """
     already_read_today = db.get_today_usage(conn, "tweet_read")
     remaining = max(cfg.daily_read_limit - already_read_today, 0)
@@ -169,6 +175,8 @@ def collect_candidates(
         )
         keyword = variants[0]
         query = f"{_query_term(variants)} -is:retweet -is:reply lang:ja"
+        sort_order = db.SORT_RELEVANCY if variants in relevancy_groups else db.SORT_RECENCY
+        extra = {"sort_order": db.SORT_RELEVANCY} if sort_order == db.SORT_RELEVANCY else {}
         resp = client.search_recent_tweets(
             query=query,
             max_results=per_query,
@@ -178,12 +186,15 @@ def collect_candidates(
             expansions=["author_id"],
             user_fields=["username"],
             user_auth=True,
+            **extra,
         )
         searched.append((keyword, len(resp.data or [])))
         dropped_known = dropped_low_engagement = dropped_duplicate = 0
         if not resp.data:
             if stats is not None:
-                stats.append(db.SearchStat(keyword, query, per_query, 0, 0, 0, 0, 0))
+                stats.append(
+                    db.SearchStat(keyword, query, per_query, 0, 0, 0, 0, 0, sort_order)
+                )
             continue
 
         read_count += len(resp.data)
@@ -231,7 +242,7 @@ def collect_candidates(
             stats.append(
                 db.SearchStat(
                     keyword, query, per_query, len(resp.data), len(resp.data) - dropped,
-                    dropped_known, dropped_low_engagement, dropped_duplicate,
+                    dropped_known, dropped_low_engagement, dropped_duplicate, sort_order,
                 )
             )
 

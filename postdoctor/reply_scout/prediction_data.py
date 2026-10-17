@@ -784,6 +784,26 @@ def graded_race_keywords(
     その中でG1→G2→G3、同グレード内は開催日が今日に近い順（金〜日は、前週末のG1より
     当週末のG2/G3を先にする）。中止日付のレースは除き、同じ表記は1つにまとめる。
     """
+    return [
+        variants
+        for variants, _current in graded_race_keyword_plan(
+            pcfg, today, cancelled_path=cancelled_path, aliases=aliases,
+            grades=grades, max_races=max_races,
+        )
+    ]
+
+
+def graded_race_keyword_plan(
+    pcfg: PredictionConfig,
+    today: date,
+    *,
+    cancelled_path: Path | None,
+    aliases: dict[str, list[str]],
+    grades: tuple[str, ...] = GRADED_CODES,
+    max_races: int = 4,
+) -> list[tuple[tuple[str, ...], bool]]:
+    """graded_race_keywords()と同じ並びで、各表記の組が当週末のレースか(True)を添えて返す。
+    同じ表記が当週末と前週末の両方にあれば、先に来る当週末の方として扱う。"""
     start, end = graded_race_window(today)
     cancellations = _load_cancellations(cancelled_path)
     in_window = []
@@ -802,9 +822,9 @@ def graded_race_keywords(
         abs((rd[1] - today).days),
         rd[0].race_key,
     ))
-    groups: list[tuple[str, ...]] = []
-    for race, _race_date in in_window:
+    plan: list[tuple[tuple[str, ...], bool]] = []
+    for race, race_date in in_window:
         variants = _search_variants(race.race_name, aliases)
-        if variants not in groups:
-            groups.append(variants)
-    return groups[:max_races]
+        if all(variants != v for v, _current in plan):
+            plan.append((variants, race_date >= weekend_start))
+    return plan[:max_races]

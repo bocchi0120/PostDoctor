@@ -413,3 +413,59 @@ def test_load_config_candidate_max_age_days_defaults_to_seven_and_can_be_overrid
         json.dumps({"keywords": ["競馬"], "candidate_max_age_days": 3}), encoding="utf-8"
     )
     assert fetcher.load_config().candidate_max_age_days == 3
+
+
+
+class _KwargsClient:
+    """呼び出しごとのquery・kwargsを記録し、投稿を1件ずつ返す。"""
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+
+    def search_recent_tweets(self, query, **kwargs):
+        self.calls.append((query, kwargs))
+        tweet = _Tweet(f"{query}-1", "1", "t", public_metrics={"like_count": 9})
+        return _Resp([tweet], users=[_User("1", "u")])
+
+
+def test_collect_candidates_sends_relevancy_only_for_listed_groups(tmp_path, monkeypatch):
+    """relevancy_groupsに含まれる組だけsort_order=relevancyを送り、他はsort_orderを送らない
+    （従来どおりのリクエスト=API既定の新しい順）。並び順は内訳にも残る。"""
+    from postdoctor import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    client = _KwargsClient()
+    monkeypatch.setattr(fetcher, "build_client", lambda account: client)
+    groups = [("富士S", "富士ステークス"), ("スワンS",), ("重賞",)]
+    stats: list[db.SearchStat] = []
+    with db.connect(_account()) as conn:
+        fetcher.collect_candidates(
+            _account(), conn, _scout_cfg(daily_read_limit=30, min_likes=5), groups,
+            stats=stats, relevancy_groups={("富士S", "富士ステークス")},
+        )
+
+    assert [kw.get("sort_order") for _q, kw in client.calls] == ["relevancy", None, None]
+    assert ["sort_order" in kw for _q, kw in client.calls] == [True, False, False]
+    assert [s.sort_order for s in stats] == ["relevancy", "recency", "recency"]
+
+    # 読み取り件数の割り振り(max_results)は、関連度順を指定しない場合と同じ
+    plain = _KwargsClient()
+    monkeypatch.setattr(fetcher, "build_client", lambda account: plain)
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path / "plain")
+    (tmp_path / "plain").mkdir()
+    with db.connect(_account()) as conn:
+        fetcher.collect_candidates(_account(), conn, _scout_cfg(daily_read_limit=30, min_likes=5), groups)
+    assert [kw["max_results"] for _q, kw in client.calls] == [
+        kw["max_results"] for _q, kw in plain.calls
+    ]
+
+
+def test_collect_candidates_without_relevancy_groups_sends_no_sort_order(tmp_path, monkeypatch):
+    from postdoctor import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    client = _KwargsClient()
+    monkeypatch.setattr(fetcher, "build_client", lambda account: client)
+    with db.connect(_account()) as conn:
+        fetcher.collect_candidates(_account(), conn, _scout_cfg(), [("重賞",)])
+    assert all("sort_order" not in kw for _q, kw in client.calls)

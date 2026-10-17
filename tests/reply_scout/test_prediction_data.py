@@ -892,3 +892,23 @@ def test_find_match_started_and_confirmed_race_cites_result(tmp_path):
     assert reason is None
     assert m.chakujun == 1
     assert "結果は1着" in m.fact_sentence
+
+
+
+def test_graded_race_keyword_plan_flags_current_weekend_races(tmp_path):
+    """当週末の重賞だけTrue。並びと中身はgraded_race_keywords()と同じ。"""
+    _write_predictions(tmp_path / "output", "predictions_20261017.json", [
+        _race("R1", "20261017", "富士ステークス", "C"),
+        _race("R2", "20261018", "秋華賞", "A"),
+    ])
+    _write_predictions(tmp_path / "output", "predictions_20261012.json", [
+        _race("R3", "20261012", "ＭＢＳ賞スワンステークス", "B"),
+    ])
+    pcfg = pd.load_prediction_config(str(tmp_path / "output"))
+    aliases = {"ＭＢＳ賞スワンステークス": ["スワンS", "スワンステークス"]}
+    plan = pd.graded_race_keyword_plan(pcfg, date(2026, 10, 17), cancelled_path=None, aliases=aliases)
+    assert [current for _v, current in plan] == [True, True, False]
+    assert [v for v, _c in plan] == pd.graded_race_keywords(
+        pcfg, date(2026, 10, 17), cancelled_path=None, aliases=aliases
+    )
+    assert plan[2][0] == ("スワンS", "スワンステークス")

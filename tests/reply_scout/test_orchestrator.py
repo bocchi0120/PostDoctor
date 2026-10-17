@@ -162,7 +162,7 @@ def test_run_scout_logs_planned_and_searched_keywords(tmp_path, monkeypatch):
     )
     seen = {}
 
-    def _fake_collect(account, conn, cfg, keyword_groups, stats=None):
+    def _fake_collect(account, conn, cfg, keyword_groups, stats=None, relevancy_groups=()):
         seen["groups"] = keyword_groups
         return [], 0, [("毎日王冠", 7), ("重賞", 0)]
 
@@ -185,7 +185,7 @@ def test_run_scout_saves_search_stats_and_logs_saved_counts(tmp_path, monkeypatc
         db.SearchStat("重賞", "重賞 -is:retweet", 25, 4, 0, 0, 3, 1),
     ]
 
-    def _fake_collect(account, conn, cfg, keyword_groups, stats=None):
+    def _fake_collect(account, conn, cfg, keyword_groups, stats=None, relevancy_groups=()):
         stats.extend(recorded)
         return [], 0, [("毎日王冠", 10), ("重賞", 4)]
 
@@ -207,7 +207,8 @@ def test_run_scout_records_nothing_when_no_search_ran(tmp_path, monkeypatch):
     monkeypatch.setattr(fetcher, "load_config", lambda: _cfg(daily_read_limit=50))
     monkeypatch.setattr(orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("重賞",)])
     monkeypatch.setattr(
-        fetcher, "collect_candidates", lambda account, conn, cfg, groups, stats=None: ([], 0, [])
+        fetcher, "collect_candidates",
+        lambda account, conn, cfg, groups, stats=None, relevancy_groups=(): ([], 0, []),
     )
     log = orchestrator.run_scout(account)
     assert log[2] == "検索語ごとの保存: なし"
@@ -253,7 +254,8 @@ def test_run_scout_ranks_only_posts_within_max_age_days(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("重賞",)])
     monkeypatch.setattr(
-        fetcher, "collect_candidates", lambda account, conn, cfg, groups, stats=None: ([], 0, [])
+        fetcher, "collect_candidates",
+        lambda account, conn, cfg, groups, stats=None, relevancy_groups=(): ([], 0, []),
     )
     monkeypatch.setattr(fetcher, "enrich_followers", lambda account, ids: {})
 
@@ -263,3 +265,64 @@ def test_run_scout_ranks_only_posts_within_max_age_days(tmp_path, monkeypatch):
         ranks = dict(conn.execute("SELECT id, rank FROM candidates").fetchall())
     assert ranks["old"] is None
     assert {ranks["fresh"], ranks["edge"]} == {1, 2}
+
+
+
+def test_relevancy_keyword_groups_are_current_weekend_graded_races_only(tmp_path):
+    """関連度順は当週末の重賞（自動キーワード）だけ。前週末の重賞と固定語は新しい順のまま。"""
+    import json
+    from dataclasses import replace
+    from datetime import date
+
+    from postdoctor.reply_scout import prediction_data
+
+    out = tmp_path / "output"
+    out.mkdir()
+    def _race(key, day, name, grade):
+        return {"race_key": key, "kaisai_date": day, "jyo_name": "東京", "race_num": "11",
+                "race_name": name, "grade_code": grade, "horses": []}
+    (out / "predictions_20261017.json").write_text(json.dumps({"races": [
+        _race("R1", "20261017", "富士ステークス", "C"), _race("R2", "20261018", "秋華賞", "A"),
+    ]}, ensure_ascii=False), encoding="utf-8")
+    (out / "predictions_20261012.json").write_text(json.dumps({"races": [
+        _race("R3", "20261012", "スワンステークス", "B"),
+    ]}, ensure_ascii=False), encoding="utf-8")
+    cfg = replace(
+        _cfg(daily_read_limit=50), auto_graded_races=True, keywords=["重賞"],
+        rakuba_output_dir=str(out),
+    )
+    pcfg = prediction_data.load_prediction_config(str(out))
+    today = date(2026, 10, 17)
+
+    groups = orchestrator.scout_keyword_groups(cfg, pcfg, today)
+    relevancy = orchestrator.relevancy_keyword_groups(cfg, pcfg, today)
+    assert relevancy == {("秋華賞",), ("富士S", "富士ステークス")}
+    assert [g for g in groups if g not in relevancy] == [("スワンS", "スワンステークス"), ("重賞",)]
+    # 自動キーワードを使わない設定なら関連度順も使わない
+    assert orchestrator.relevancy_keyword_groups(replace(cfg, auto_graded_races=False), pcfg, today) == set()
+
+
+def test_run_scout_passes_relevancy_groups_and_logs_sort_order(tmp_path, monkeypatch):
+    account = _account(tmp_path, monkeypatch)
+    monkeypatch.setattr(fetcher, "load_config", lambda: _cfg(daily_read_limit=50))
+    monkeypatch.setattr(
+        orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("富士S",), ("重賞",)]
+    )
+    monkeypatch.setattr(orchestrator, "relevancy_keyword_groups", lambda cfg, pcfg, today: {("富士S",)})
+    seen = {}
+
+    def _fake_collect(account, conn, cfg, keyword_groups, stats=None, relevancy_groups=()):
+        seen["relevancy"] = relevancy_groups
+        stats.extend([
+            db.SearchStat("富士S", "q1", 25, 10, 1, 0, 9, 0, db.SORT_RELEVANCY),
+            db.SearchStat("重賞", "q2", 25, 10, 0, 0, 10, 0),
+        ])
+        return [], 0, [("富士S", 10), ("重賞", 10)]
+
+    monkeypatch.setattr(fetcher, "collect_candidates", _fake_collect)
+    log = orchestrator.run_scout(account)
+    assert seen["relevancy"] == {("富士S",)}
+    assert log[2] == (
+        "検索語ごとの保存: 富士S[関連度順] 読取10→保存1（いいね等不足9）, "
+        "重賞 読取10→保存0（いいね等不足10）"
+    )

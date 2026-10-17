@@ -309,3 +309,44 @@ def test_load_scoring_candidates_cutoff_excludes_missing_or_unreadable_created_a
     # オフセット無しはJSTとして読む（candidates.created_atはJSTで保存する約束）
     assert [c.id for c in db.load_scoring_candidates(conn, since)] == ["naive"]
     assert conn.execute("SELECT COUNT(*) FROM candidates").fetchone()[0] == 3
+
+
+
+def test_scout_searches_round_trips_sort_order(conn):
+    db.save_scout_searches(conn, [
+        db.SearchStat("富士S", "q1", 10, 10, 1, 0, 9, 0, db.SORT_RELEVANCY),
+        db.SearchStat("重賞", "q2", 10, 10, 0, 0, 10, 0),
+    ])
+    run_at = conn.execute("SELECT run_at FROM scout_searches").fetchone()[0]
+    assert [s.sort_order for s in db.get_scout_searches(conn, run_at)] == ["relevancy", "recency"]
+
+
+def test_init_db_adds_sort_order_to_existing_scout_searches_keeping_old_rows():
+    """sort_order列が無い既存のscout_searchesに列を足す。既存の行は変えず(NULLのまま)、
+    読み出しでは、sort_orderを送っていなかった(=新しい順)ので"recency"として返す。"""
+    connection = sqlite3.connect(":memory:")
+    db.init_db(connection)
+    connection.execute("DROP TABLE scout_searches")
+    connection.execute("""
+        CREATE TABLE scout_searches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_at TEXT NOT NULL, position INTEGER NOT NULL,
+            keyword TEXT NOT NULL, query TEXT NOT NULL, max_results INTEGER NOT NULL,
+            read_count INTEGER NOT NULL, saved_count INTEGER NOT NULL,
+            dropped_known INTEGER NOT NULL, dropped_low_engagement INTEGER NOT NULL,
+            dropped_duplicate INTEGER NOT NULL
+        )""")
+    connection.execute(
+        "INSERT INTO scout_searches (run_at, position, keyword, query, max_results, read_count,"
+        " saved_count, dropped_known, dropped_low_engagement, dropped_duplicate)"
+        " VALUES ('old', 0, 'スワンS', 'q', 10, 10, 2, 0, 8, 0)"
+    )
+    connection.commit()
+
+    db.init_db(connection)
+    cols = {row[1] for row in connection.execute("PRAGMA table_info(scout_searches)").fetchall()}
+    assert "sort_order" in cols
+    assert connection.execute("SELECT sort_order FROM scout_searches").fetchone() == (None,)
+    assert db.get_scout_searches(connection, "old") == [
+        db.SearchStat("スワンS", "q", 10, 10, 2, 0, 8, 0, "recency")
+    ]
+    connection.close()
