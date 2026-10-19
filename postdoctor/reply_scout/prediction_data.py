@@ -197,6 +197,21 @@ def has_started(horse: HorseRow, now: datetime) -> bool:
     return now >= start
 
 
+def posted_before_start(horse: HorseRow, created_at: str | None) -> bool:
+    """投稿日時(ISO8601)が発走時刻より前か。発走日時・投稿日時のどちらかが分からなければ
+    False（判定しない）。投稿日時にタイムゾーンが無ければJSTとみなす。"""
+    start = race_start_at(horse)
+    if start is None or not created_at:
+        return False
+    try:
+        posted = datetime.fromisoformat(created_at)
+    except (ValueError, TypeError):
+        return False
+    if posted.tzinfo is None:
+        posted = posted.replace(tzinfo=JST)
+    return posted < start
+
+
 def compute_predictions_signature(pcfg: PredictionConfig) -> str | None:
     """rolling + snapshotファイル群の内容から決定的なハッシュを計算する。
 
@@ -608,6 +623,11 @@ def find_match(
        (None, REASON_RESULT_PENDING) を返す（結果の取り込み待ち。比べるのは投稿日時では
        なく現在時刻: レース前の投稿でも、発走後に「…評価としています」と返すのは不自然）。
        発走時刻が分からないレースはこの判定をしない。nowを省略した場合も判定しない。
+    5. 投稿日時(created_at)が発走時刻より前で、そのレースが発走済み（確定済み、または
+       now時点で発走時刻を過ぎている）なら、結果の有無を問わず (None, REASON_TIME_MISMATCH)
+       を返す。3の語による判定を通り抜けるレース前の投稿（「明日勝つためのおまじない」
+       「秋華賞はモンローウォークが本命」など。2026-10-18秋華賞の実例）を、発走時刻で止める。
+       発走時刻が分からないレース、created_atが無い/読めない場合はこの判定をしない。
     """
     horse_candidates = [
         h for h in horses if len(h.uma_name) >= 2 and _horse_name_matches(h, candidate_text)
@@ -627,6 +647,9 @@ def find_match(
     concluded = chosen.race_key in confirmed
 
     if concluded and _is_pre_race_framing(candidate_text):
+        return None, REASON_TIME_MISMATCH
+    started = concluded or (now is not None and has_started(chosen, now))
+    if started and posted_before_start(chosen, created_at):
         return None, REASON_TIME_MISMATCH
     if not concluded and now is not None and has_started(chosen, now):
         return None, REASON_RESULT_PENDING

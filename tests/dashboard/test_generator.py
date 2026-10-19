@@ -122,3 +122,4 @@ def test_time_skip_card_explains_result_pending_after_start(tmp_path, monkeypatc
     card = generator._reply_scout_candidate_card(account, ranked, None)
     assert "時制スキップ" in card
     assert "発走済みで結果の取り込み待ち" in card
+    assert "発走前に書かれた投稿で、そのレースがすでに発走済み" in card

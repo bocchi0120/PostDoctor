@@ -894,6 +894,130 @@ def test_find_match_started_and_confirmed_race_cites_result(tmp_path):
     assert "結果は1着" in m.fact_sentence
 
 
+def _shukasho_race():
+    """2026-10-18 京都11R 秋華賞（発走15:40）。実データの評価順位のとおり。"""
+    return {
+        "race_key": "2026101808040711", "kaisai_date": "20261018", "jyo_name": "京都",
+        "race_num": "11", "distance": 2000, "race_name": "秋華賞", "start_time": "1540",
+        "horses": [
+            {"pred_rank": 3, "uma_num": 8, "uma_code": "2023106859", "uma_name": "モンローウォーク", "score": 0.6958},
+            {"pred_rank": 12, "uma_num": 11, "uma_code": "2023107075", "uma_name": "ガーネットフレア", "score": -0.0737},
+        ],
+    }
+
+
+_KARENNN_TEXT = "秋華賞はガーネットフレア\n⠀\n秋華賞はガーネットフレア\n⠀\n明日勝つためのおまじない♪"
+_GAMBLER_TEXT = (
+    "秋華賞\n\n秋華賞はモンローウォークは本命\n他の馬券内2頭を探すことにします😊\n\n"
+    "いま気になってるのは\nエンネ\nカナルサンマルタン\n\n#秋華賞"
+)
+
+
+@pytest.mark.parametrize(
+    "text, created_at",
+    [
+        (_KARENNN_TEXT, "2026-10-18T00:04:00+09:00"),  # @karennn_keiba 土曜深夜の「おまじない」
+        (_GAMBLER_TEXT, "2026-10-13T08:25:00+09:00"),  # @gambler87240107 秋華賞の本命
+    ],
+)
+def test_find_match_skips_post_written_before_start_of_started_race(tmp_path, text, created_at):
+    """語による判定（「予想」等）を通り抜けるレース前の投稿でも、発走時刻より前に書かれて
+    いて、そのレースが発走済みなら、結果の有無を問わず時制スキップにする。"""
+    # 投稿が語の判定に掛からないこと（新規則だけで止まっていること）の確認
+    assert not pd._is_pre_race_framing(text)
+    for i, results_rows in enumerate((
+        [("2026101808040711", "2023106859", 8, 1), ("2026101808040711", "2023107075", 11, 11)],  # 確定
+        [("2026101808040711", "2023106859", 8, 0), ("2026101808040711", "2023107075", 11, 0)],   # 結果待ち
+    )):
+        (tmp_path / str(i)).mkdir()
+        pcfg = _write_rakuba_dir(
+            tmp_path / str(i), races=[_shukasho_race()], results_rows=results_rows
+        )
+        rows, results, confirmed = _rows_results(pcfg)
+        now = pd.datetime.fromisoformat("2026-10-19T19:10:00+09:00")
+        m, reason = pd.find_match(text, rows, results, confirmed, created_at=created_at, now=now)
+        assert m is None
+        assert reason == pd.REASON_TIME_MISMATCH
+
+
+def test_find_match_confirmed_race_without_now_still_skips_pre_start_post(tmp_path):
+    """確定済みなら発走済みなので、nowを渡さなくても発走時刻の規則は効く。"""
+    pcfg = _write_rakuba_dir(
+        tmp_path, races=[_shukasho_race()],
+        results_rows=[("2026101808040711", "2023107075", 11, 11)],
+    )
+    rows, results, confirmed = _rows_results(pcfg)
+    m, reason = pd.find_match(
+        _KARENNN_TEXT, rows, results, confirmed, created_at="2026-10-18T00:04:00+09:00"
+    )
+    assert m is None and reason == pd.REASON_TIME_MISMATCH
+
+
+def test_find_match_pre_start_post_before_the_race_starts_keeps_pre_race_sentence(tmp_path):
+    """まだ発走前（now < 発走時刻）なら、レース前の投稿にレース前の言い方で返す（従来どおり）。"""
+    pcfg = _write_rakuba_dir(tmp_path, races=[_shukasho_race()])
+    rows, results, confirmed = _rows_results(pcfg)
+    now = pd.datetime.fromisoformat("2026-10-18T12:00:00+09:00")
+    m, reason = pd.find_match(
+        _KARENNN_TEXT, rows, results, confirmed, created_at="2026-10-18T00:04:00+09:00", now=now
+    )
+    assert reason is None
+    assert m.fact_sentence.endswith("12番手評価としています。")
+
+
+@pytest.mark.parametrize("created_at", ["2026-10-18T15:40:00+09:00", "2026-10-18T17:30:00+09:00"])
+def test_find_match_post_written_after_start_still_cites_result(tmp_path, created_at):
+    """発走時刻以降に書かれた投稿は新規則の対象外。結果が入っていれば結果付きで返す。"""
+    pcfg = _write_rakuba_dir(
+        tmp_path, races=[_shukasho_race()],
+        results_rows=[("2026101808040711", "2023106859", 8, 1)],
+    )
+    rows, results, confirmed = _rows_results(pcfg)
+    now = pd.datetime.fromisoformat("2026-10-19T19:10:00+09:00")
+    m, reason = pd.find_match(
+        "モンローウォーク強かった！", rows, results, confirmed, created_at=created_at, now=now
+    )
+    assert reason is None
+    assert "実際に1着" in m.fact_sentence
+
+
+def test_find_match_pre_start_post_with_unknown_start_time_is_not_skipped(tmp_path):
+    """発走時刻が分からないレースには新規則を適用しない（従来どおり結果付きで返す）。"""
+    race = _shukasho_race()
+    del race["start_time"]
+    pcfg = _write_rakuba_dir(
+        tmp_path, races=[race], results_rows=[("2026101808040711", "2023107075", 11, 11)],
+    )
+    rows, results, confirmed = _rows_results(pcfg)
+    now = pd.datetime.fromisoformat("2026-10-19T19:10:00+09:00")
+    m, reason = pd.find_match(
+        _KARENNN_TEXT, rows, results, confirmed, created_at="2026-10-18T00:04:00+09:00", now=now
+    )
+    assert reason is None
+    assert "結果は11着" in m.fact_sentence
+
+
+@pytest.mark.parametrize(
+    "created_at, expected",
+    [
+        ("2026-10-18T15:39:59+09:00", True),
+        ("2026-10-18T15:40:00+09:00", False),   # 発走時刻ちょうどは「前」ではない
+        ("2026-10-18T06:39:00+00:00", True),    # UTCで渡しても同じ時刻
+        ("2026-10-18T15:30:00", True),          # タイムゾーン無しはJST
+        ("", False),
+        (None, False),
+        ("not-a-date", False),
+    ],
+)
+def test_posted_before_start(created_at, expected):
+    horse = pd.HorseRow(
+        race_key="R", kaisai_date="20261018", jyo_name="京都", race_num="11", race_name="秋華賞",
+        distance=2000, pred_rank=1, uma_num=1, uma_code="U", uma_name="ウマ", score=0.0,
+        start_time="1540",
+    )
+    assert pd.posted_before_start(horse, created_at) is expected
+
+
 
 def test_graded_race_keyword_plan_flags_current_weekend_races(tmp_path):
     """当週末の重賞だけTrue。並びと中身はgraded_race_keywords()と同じ。"""

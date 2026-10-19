@@ -388,6 +388,28 @@
     `test_draft_top_candidates_records_result_pending_as_time_skip_and_retries_later`、
     `test_load_all_predictions_reads_start_time_and_backfills_from_race_info`、
     `test_has_started_compares_jst_start_with_now`ほか。
+21. **語の判定を通り抜けたレース前の投稿に、確定結果を返していた（2026-10-19発覚）**:
+    @karennn_keiba（10/18 00:04「秋華賞はガーネットフレア…明日勝つためのおまじない♪」）と
+    @gambler87240107（10/13「秋華賞はモンローウォークは本命」）の下書きが、秋華賞（10/18 15:40発走）の
+    結果付きで作られていた。どちらも`PRE_RACE_INDICATORS`の語を含まない（「本命」「明日」は対象外）。
+    → 修正: `prediction_data.posted_before_start()`を追加。`find_match()`は、投稿日時(created_at)が
+    発走時刻より前で、そのレースが発走済み（確定済み、または`now`時点で発走時刻を過ぎている）なら、
+    結果の有無を問わず`(None, REASON_TIME_MISMATCH)`を返す。語による判定はそのまま残し、新規則は
+    追加で効かせる。発走時刻・投稿日時が分からなければ適用しない。発走時刻以降の投稿は対象外。
+    既存の下書き（上の2候補の各2案）は自動では消えない（`draft_top_candidates()`は下書きのある
+    候補を飛ばすため）。回帰テスト:
+    `test_find_match_skips_post_written_before_start_of_started_race`、
+    `test_find_match_post_written_after_start_still_cites_result`、`test_posted_before_start`ほか。
+22. **反応文に置換文字(U+FFFD)が入り、「秋華賞」が「秋華�械」と化けた（2026-10-19発覚）**:
+    @SuMat0ra7 の案1。DBの`drafts.draft_text`にU+FFFD（UTF-8でEF BF BD）のまま保存されていた。
+    PostDoctor側にはバイト列を復号する箇所が無く（SDKの非ストリーミング応答の`text`を
+    そのまま連結・保存・`html.escape`して表示）、Claudeの応答の時点で入っていたと判断した
+    （生の応答は保存していないため直接の確認はできない）。
+    → 修正: 破棄フィルタ「文字化け」(`prescriber.MOJIBAKE_RE`: U+FFFDと、改行・タブ以外の
+    C0/C1制御文字)を`_DISCARD_FILTERS`に追加。該当した案は他のフィルタと同じく案ごと破棄し、
+    `discarded_reactions`に記録する。回帰テスト:
+    `test_generate_drafts_discards_mojibake_variant_and_records_it`、
+    `test_mojibake_re_catches_replacement_and_control_characters`。
 
 ## 5. スコアリング・候補選定の判断
 

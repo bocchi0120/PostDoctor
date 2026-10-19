@@ -123,6 +123,11 @@ NUMBER_PRAISE_RE = re.compile(
     + "|" + _PRAISE_WORDS + r"[^。！!？?、]{0,4}" + _NUMBER_WORDS
 )
 
+# 文字化け。U+FFFD(置換文字)と、改行・タブ以外の制御文字を含む案を破棄する。
+# Claudeの応答そのものにU+FFFDが入って返ることがある（2026-10-19、@SuMat0ra7 の案1で
+# 「秋華賞」が「秋華\ufffd械」になった実例。DBにはU+FFFDのまま保存されていた）。
+MOJIBAKE_RE = re.compile("[\ufffd\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
 # 反応文に適用する破棄フィルタ。事実文(fact_sentence)には適用しない
 # (事実文は「…1番手評価としていて」のように評価そのものを述べるのが役目)。
 # 名前は実行ログに出す（どのフィルタで破棄が多いかを後から数えるため）。
@@ -131,6 +136,7 @@ _DISCARD_FILTERS = (
     ("一致の主張", AGREEMENT_CLAIM_RE),
     ("自分の評価", SELF_STANCE_CLAIM_RE),
     ("数字の称賛", NUMBER_PRAISE_RE),
+    ("文字化け", MOJIBAKE_RE),
 )
 _DISCARD_RES = tuple(regex for _name, regex in _DISCARD_FILTERS)
 LOG_REACTION_HEAD_LEN = 20  # ログ・DBに残す反応文の先頭文字数（全文は長いので残さない）
@@ -270,7 +276,7 @@ def _call_claude(
         return _CallResult([], problem="unparsable", stop_reason=stop_reason)
 
     # 多重防御: 数字・マーク、相手の予想との一致・不一致の主張、自分の過去の評価の主張、
-    # 相手の数字の称賛が混入した案は、文字を削って繋げるのではなく案ごと破棄する
+    # 相手の数字の称賛、文字化けが混入した案は、文字を削って繋げるのではなく案ごと破棄する
     # （不自然な文になることを避け、確定していない事実が紛れ込む余地を構造的に無くす）。
     numbered = [(i, r) for i, r in enumerate(reactions, start=1) if r]
     kept = [r for _i, r in numbered if _reaction_is_acceptable(r)]
@@ -361,8 +367,8 @@ def draft_top_candidates(
 
     Rakuba予測データに一致しない候補は生成をハードスキップし
     （Claude API呼び出しゼロ）、prediction_status='予測データ未投入'として記録する。
-    一致したレースが確定済みでレース前の投稿、または発走済みで結果の取り込み待ちの
-    場合は'時制スキップ'として記録する。どちらも下書きの行は作らないので、次回の実行で
+    一致したレースが確定済みでレース前の投稿、発走前に書かれた投稿でレースが発走済み、
+    または発走済みで結果の取り込み待ちの場合は'時制スキップ'として記録する。どちらも下書きの行は作らないので、次回の実行で
     再判定される（結果が入れば結果付きの文面で作られる）。
     """
     pcfg = prediction_data.load_prediction_config(cfg.rakuba_output_dir)

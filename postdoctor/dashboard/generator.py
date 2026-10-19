@@ -471,9 +471,10 @@ def _reply_scout_candidate_card(
         drafts_html = '<p class="muted rs-nodata">予測データ未投入（対応するRakuba予測が見つかりませんでした）</p>'
     elif ranked.prediction_status == "時制スキップ":
         drafts_html = (
-            '<p class="muted rs-nodata">時制スキップ（レース確定後のレース前投稿への返信になる、'
-            'または発走済みで結果の取り込み待ちのため見送りました。結果が入れば次回の下書き生成で'
-            '再判定します）</p>'
+            '<p class="muted rs-nodata">時制スキップ（発走前に書かれた投稿で、そのレースがすでに'
+            '発走済みのため、またはレース確定後のレース前の言い方の投稿への返信になるため、'
+            'または発走済みで結果の取り込み待ちのため見送りました。結果の取り込み待ちの場合は、'
+            '結果が入れば次回の下書き生成で再判定します）</p>'
         )
     else:
         drafts_html = (

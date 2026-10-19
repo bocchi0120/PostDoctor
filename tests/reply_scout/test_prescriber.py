@@ -631,14 +631,55 @@ def test_discard_reasons_names_every_matching_filter(reaction, expected):
     assert prescriber._reaction_is_acceptable(reaction) is (expected == [])
 
 
-def test_discard_filter_names_cover_all_four_filters():
+def test_discard_filter_names_cover_all_five_filters():
     assert [name for name, _regex in prescriber._DISCARD_FILTERS] == [
-        "数字・印", "一致の主張", "自分の評価", "数字の称賛",
+        "数字・印", "一致の主張", "自分の評価", "数字の称賛", "文字化け",
     ]
     assert [regex for _name, regex in prescriber._DISCARD_FILTERS] == [
         prescriber.NUMERIC_MARK_RE, prescriber.AGREEMENT_CLAIM_RE,
-        prescriber.SELF_STANCE_CLAIM_RE, prescriber.NUMBER_PRAISE_RE,
+        prescriber.SELF_STANCE_CLAIM_RE, prescriber.NUMBER_PRAISE_RE, prescriber.MOJIBAKE_RE,
     ]
+
+
+@pytest.mark.parametrize(
+    "reaction",
+    [
+        "三冠馬誕生前週の秋華\ufffd械に共通点があるというのは面白い視点ですね",  # 2026-10-19 @SuMat0ra7
+        "いい馬\x00ですよね",
+        "いい馬\x1bですよね",
+        "いい馬\x7fですよね",
+        "いい馬\x85ですよね",
+    ],
+)
+def test_mojibake_re_catches_replacement_and_control_characters(reaction):
+    assert prescriber._discard_reasons(reaction) == ["文字化け"]
+
+
+@pytest.mark.parametrize(
+    "reaction",
+    ["いい馬ですよね", "いい馬ですよね\n楽しみです", "いい馬\tですよね", "6\ufe0f\u20e3枠が面白いですね"],
+)
+def test_mojibake_re_allows_newline_tab_and_emoji(reaction):
+    assert not prescriber.MOJIBAKE_RE.search(reaction), reaction
+
+
+def test_generate_drafts_discards_mojibake_variant_and_records_it(monkeypatch, conn):
+    """@SuMat0ra7 の実例: U+FFFDを含む案は下書きに残さず、文字化けとして記録する。"""
+    match = _find_match("テストホースイチが強かった")
+    bad = "三冠馬誕生前週の秋華\ufffd械に共通点があるというのは面白い視点ですね"
+    _patch_responses(monkeypatch, [
+        _FakeResponseWithStop(
+            json.dumps({"reactions": [bad, "いい馬ですよね"]}, ensure_ascii=False), "end_turn"
+        ),
+        _FakeResponseWithStop('{"reactions": ["気になる存在です"]}', "end_turn"),
+    ])
+    drafts = prescriber.generate_drafts(_candidate("c1", "x"), match, conn=conn)
+
+    assert _discard_rows(conn) == [("c1", 1, 1, '["文字化け"]', bad[:20])]
+    assert [d.replace(match.fact_sentence, "").strip() for d in drafts] == [
+        "いい馬ですよね", "気になる存在です",
+    ]
+    assert not any("\ufffd" in d for d in drafts)
 
 
 def test_discard_log_shows_filter_names_and_truncated_head_not_full_text(monkeypatch):
@@ -858,7 +899,11 @@ def test_draft_top_candidates_records_result_pending_as_time_skip_and_retries_la
     results_path.write_text("race_key,uma_code,uma_num,chakujun\nR1,U1,13,0\nR1,U2,1,0\n", encoding="utf-8")
     cfg = replace(_cfg(), rakuba_output_dir=str(out))
 
-    db.insert_candidates(conn, [_candidate("s", "シュガークン号騎乗の吉村騎手は中央重賞4勝目")])
+    # 実例どおりレース後(発走の約2時間後)の投稿。レース前の投稿は発走時刻の規則で止まる
+    after_start = f"{yesterday[:4]}-{yesterday[4:6]}-{yesterday[6:]}T17:48:00+09:00"
+    db.insert_candidates(conn, [replace(
+        _candidate("s", "シュガークン号騎乗の吉村騎手は中央重賞4勝目"), created_at=after_start
+    )])
     db.set_ranking(conn, [("s", 0.9, 1)])
     calls = _patch_responses(
         monkeypatch,
