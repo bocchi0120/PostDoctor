@@ -1036,3 +1036,38 @@ def test_graded_race_keyword_plan_flags_current_weekend_races(tmp_path):
         pcfg, date(2026, 10, 17), cancelled_path=None, aliases=aliases
     )
     assert plan[2][0] == ("スワンS", "スワンステークス")
+
+
+def test_graded_race_keywords_drops_races_that_have_started(tmp_path):
+    """nowを渡すと発走済みの重賞は除き、空いた枠に次のレースが入る。発走時刻不明は残す。"""
+    from datetime import datetime
+
+    out_dir = tmp_path / "output"
+    _write_predictions(out_dir, "predictions_20261025.json", [
+        {**_race("R1", "20261024", "アルテミスステークス", "C"), "start_time": "1545"},
+        {**_race("R2", "20261025", "菊花賞", "A", jyo_name="京都"), "start_time": "1540"},
+        _race("R3", "20261025", "ブラジルカップ", "C", race_num=10),  # 発走時刻不明
+        _race("R4", "20261025", "天皇賞", "A"),  # race_info.csvで補う
+    ])
+    (out_dir / "race_info.csv").write_text(
+        "race_key,start_time\nR4,1105\n", encoding="utf-8"
+    )
+    pcfg = pd.load_prediction_config(str(out_dir))
+    kwargs = dict(cancelled_path=None, aliases={}, max_races=2)
+    today = date(2026, 10, 25)
+
+    # nowを渡さなければ従来どおり（発走済みでも残る）
+    assert pd.graded_race_keywords(pcfg, today, **kwargs) == [("菊花賞",), ("天皇賞",)]
+
+    sunday_morning = datetime(2026, 10, 25, 9, 30, tzinfo=pd.JST)
+    assert pd.graded_race_keywords(pcfg, today, now=sunday_morning, **kwargs) == [
+        ("菊花賞",), ("天皇賞",),
+    ]
+    # 11:05(race_info.csvの発走時刻)を過ぎると天皇賞が外れ、2枠目に時刻不明のレースが入る
+    noon = datetime(2026, 10, 25, 12, 0, tzinfo=pd.JST)
+    assert pd.graded_race_keywords(pcfg, today, now=noon, **kwargs) == [
+        ("菊花賞",), ("ブラジルカップ",),
+    ]
+    # 菊花賞の発走時刻ちょうどで発走済み。時刻不明のレースだけが残る
+    post_time = datetime(2026, 10, 25, 15, 40, tzinfo=pd.JST)
+    assert pd.graded_race_keywords(pcfg, today, now=post_time, **kwargs) == [("ブラジルカップ",)]

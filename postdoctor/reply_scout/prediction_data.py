@@ -174,7 +174,7 @@ def load_race_start_times(pcfg: PredictionConfig) -> dict[str, str]:
     return start_times
 
 
-def race_start_at(horse: HorseRow) -> datetime | None:
+def race_start_at(horse: HorseRow | GradedRace) -> datetime | None:
     """kaisai_date＋start_timeを発走日時(JST)にする。どちらかが欠けている・読めなければNone。"""
     if len(horse.start_time) != 4 or not horse.start_time.isdigit():
         return None
@@ -186,7 +186,7 @@ def race_start_at(horse: HorseRow) -> datetime | None:
         return None
 
 
-def has_started(horse: HorseRow, now: datetime) -> bool:
+def has_started(horse: HorseRow | GradedRace, now: datetime) -> bool:
     """nowの時点で発走時刻を過ぎているか。発走日時が分からないレースはFalse（判定しない）。
     nowにタイムゾーンが無ければJSTとみなす。"""
     start = race_start_at(horse)
@@ -688,6 +688,7 @@ class GradedRace:
     race_num: str
     race_name: str
     grade_code: str
+    start_time: str = ""  # "HHMM"（JST）。分からなければ""
 
 
 def graded_race_window(today: date) -> tuple[date, date]:
@@ -740,8 +741,16 @@ def _load_graded_races(pcfg: PredictionConfig, grades: tuple[str, ...]) -> list[
                 race_num=str(race.get("race_num", "")),
                 race_name=name,
                 grade_code=grade,
+                start_time=str(race.get("start_time") or ""),
             )
-    return list(merged.values())
+    races = list(merged.values())
+    if any(not r.start_time for r in races):
+        start_times = load_race_start_times(pcfg)
+        races = [
+            replace(r, start_time=start_times.get(r.race_key, "")) if not r.start_time else r
+            for r in races
+        ]
+    return races
 
 
 def _load_cancellations(path: Path | None) -> list[dict]:
@@ -799,6 +808,7 @@ def graded_race_keywords(
     aliases: dict[str, list[str]],
     grades: tuple[str, ...] = GRADED_CODES,
     max_races: int = 4,
+    now: datetime | None = None,
 ) -> list[tuple[str, ...]]:
     """scoutで検索する直近の重賞レース名（表記の組）を優先順に返す。
 
@@ -806,12 +816,14 @@ def graded_race_keywords(
     取れず下書きにならないため、外部の重賞日程は参照しない）。優先順は当週末→前週末、
     その中でG1→G2→G3、同グレード内は開催日が今日に近い順（金〜日は、前週末のG1より
     当週末のG2/G3を先にする）。中止日付のレースは除き、同じ表記は1つにまとめる。
+    nowを渡すと、その時点で発走済みのレースも除く（終わったレースの投稿は時制スキップか
+    照合なしがほとんどで、読み取り枠の無駄になるため）。発走時刻が分からないレースは除かない。
     """
     return [
         variants
         for variants, _current in graded_race_keyword_plan(
             pcfg, today, cancelled_path=cancelled_path, aliases=aliases,
-            grades=grades, max_races=max_races,
+            grades=grades, max_races=max_races, now=now,
         )
     ]
 
@@ -824,6 +836,7 @@ def graded_race_keyword_plan(
     aliases: dict[str, list[str]],
     grades: tuple[str, ...] = GRADED_CODES,
     max_races: int = 4,
+    now: datetime | None = None,
 ) -> list[tuple[tuple[str, ...], bool]]:
     """graded_race_keywords()と同じ並びで、各表記の組が当週末のレースか(True)を添えて返す。
     同じ表記が当週末と前週末の両方にあれば、先に来る当週末の方として扱う。"""
@@ -835,6 +848,8 @@ def graded_race_keyword_plan(
         if race_date is None or not (start <= race_date <= end):
             continue
         if _is_cancelled(race, cancellations):
+            continue
+        if now is not None and has_started(race, now):
             continue
         in_window.append((race, race_date))
 

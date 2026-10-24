@@ -22,9 +22,14 @@ JST = timezone(timedelta(hours=9))
 
 
 def scout_keyword_groups(
-    cfg: fetcher.ScoutConfig, pcfg: prediction_data.PredictionConfig, today: date
+    cfg: fetcher.ScoutConfig,
+    pcfg: prediction_data.PredictionConfig,
+    today: date,
+    now: datetime | None = None,
 ) -> list[tuple[str, ...]]:
     """scoutの検索語の組（優先順）: 直近の重賞名を先に、keywords.jsonの固定語を後に。
+
+    nowを渡すと、その時点で発走済みの重賞は検索語にしない（発走時刻が分からないものは残す）。
 
     検索回数が日次上限で足りない週は、後ろ（固定語）から切り捨てられる。
     """
@@ -37,6 +42,7 @@ def scout_keyword_groups(
             aliases=cfg.race_aliases,
             grades=cfg.graded_grades,
             max_races=cfg.max_graded_races,
+            now=now,
         )
     for keyword in cfg.keywords:
         if not any(keyword in g for g in groups):
@@ -90,8 +96,9 @@ def run_scout(account: Account) -> list[str]:
     prediction_rows = prediction_data.load_all_predictions(pcfg)
     horse_names = frozenset(prediction_data.all_horse_names(prediction_rows))
     race_names = frozenset(prediction_data.all_race_names(prediction_rows))
-    today = datetime.now(JST).date()
-    keyword_groups = scout_keyword_groups(cfg, pcfg, today)
+    now = datetime.now(JST)
+    today = now.date()
+    keyword_groups = scout_keyword_groups(cfg, pcfg, today, now)
 
     # recent searchが返す範囲（直近cfg.candidate_max_age_days日）より古い候補はランキング対象外
     posted_since = datetime.now(JST) - timedelta(days=cfg.candidate_max_age_days)

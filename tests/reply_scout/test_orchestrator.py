@@ -154,11 +154,59 @@ def test_scout_keyword_groups_puts_graded_races_before_fixed_keywords(tmp_path):
     ]
 
 
+def test_scout_keyword_groups_drops_started_graded_races(tmp_path):
+    """日曜の朝: 土曜に発走済みの重賞は検索語にせず、日曜の重賞と固定語だけが残る。"""
+    import json
+    from dataclasses import replace
+    from datetime import date, datetime
+
+    from postdoctor.reply_scout import prediction_data
+
+    out_dir = tmp_path / "output"
+    out_dir.mkdir()
+    (out_dir / "predictions_20261025.json").write_text(json.dumps({"races": [
+        {"race_key": "R1", "kaisai_date": "20261024", "jyo_name": "東京", "race_num": 11,
+         "race_name": "アルテミスステークス", "grade_code": "C", "start_time": "1545", "horses": []},
+        {"race_key": "R2", "kaisai_date": "20261025", "jyo_name": "京都", "race_num": 11,
+         "race_name": "菊花賞", "grade_code": "A", "start_time": "1540", "horses": []},
+    ]}, ensure_ascii=False), encoding="utf-8")
+    cfg = replace(
+        _cfg(daily_read_limit=50), keywords=["重賞"],
+        auto_graded_races=True, rakuba_output_dir=str(out_dir),
+    )
+    pcfg = prediction_data.load_prediction_config(cfg.rakuba_output_dir)
+    sunday = date(2026, 10, 25)
+
+    assert orchestrator.scout_keyword_groups(cfg, pcfg, sunday) == [
+        ("菊花賞",), ("アルテミスS", "アルテミスステークス"), ("重賞",),
+    ]
+    morning = datetime(2026, 10, 25, 9, 30, tzinfo=orchestrator.JST)
+    assert orchestrator.scout_keyword_groups(cfg, pcfg, sunday, morning) == [("菊花賞",), ("重賞",)]
+
+
+def test_run_scout_passes_current_time_to_keyword_groups(tmp_path, monkeypatch):
+    account = _account(tmp_path, monkeypatch)
+    monkeypatch.setattr(fetcher, "load_config", lambda: _cfg(daily_read_limit=50))
+    captured = {}
+
+    def fake_groups(cfg, pcfg, today, now=None):
+        captured["today"], captured["now"] = today, now
+        return [("重賞",)]
+
+    monkeypatch.setattr(orchestrator, "scout_keyword_groups", fake_groups)
+    monkeypatch.setattr(
+        fetcher, "collect_candidates", lambda *a, **k: ([], 0, [])
+    )
+    orchestrator.run_scout(account)
+    assert captured["now"] is not None and captured["now"].tzinfo is not None
+    assert captured["now"].date() == captured["today"]
+
+
 def test_run_scout_logs_planned_and_searched_keywords(tmp_path, monkeypatch):
     account = _account(tmp_path, monkeypatch)
     monkeypatch.setattr(fetcher, "load_config", lambda: _cfg(daily_read_limit=50))
     monkeypatch.setattr(
-        orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("毎日王冠",), ("重賞",)]
+        orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today, now=None: [("毎日王冠",), ("重賞",)]
     )
     seen = {}
 
@@ -178,7 +226,7 @@ def test_run_scout_saves_search_stats_and_logs_saved_counts(tmp_path, monkeypatc
     account = _account(tmp_path, monkeypatch)
     monkeypatch.setattr(fetcher, "load_config", lambda: _cfg(daily_read_limit=50))
     monkeypatch.setattr(
-        orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("毎日王冠",), ("重賞",)]
+        orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today, now=None: [("毎日王冠",), ("重賞",)]
     )
     recorded = [
         db.SearchStat("毎日王冠", "毎日王冠 -is:retweet", 25, 10, 2, 1, 7, 0),
@@ -205,7 +253,7 @@ def test_run_scout_saves_search_stats_and_logs_saved_counts(tmp_path, monkeypatc
 def test_run_scout_records_nothing_when_no_search_ran(tmp_path, monkeypatch):
     account = _account(tmp_path, monkeypatch)
     monkeypatch.setattr(fetcher, "load_config", lambda: _cfg(daily_read_limit=50))
-    monkeypatch.setattr(orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("重賞",)])
+    monkeypatch.setattr(orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today, now=None: [("重賞",)])
     monkeypatch.setattr(
         fetcher, "collect_candidates",
         lambda account, conn, cfg, groups, stats=None: ([], 0, []),
@@ -252,7 +300,7 @@ def test_run_scout_ranks_only_posts_within_max_age_days(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fetcher, "load_config", lambda: replace(_cfg(daily_read_limit=50), candidate_max_age_days=3)
     )
-    monkeypatch.setattr(orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("重賞",)])
+    monkeypatch.setattr(orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today, now=None: [("重賞",)])
     monkeypatch.setattr(
         fetcher, "collect_candidates",
         lambda account, conn, cfg, groups, stats=None: ([], 0, []),
@@ -272,7 +320,7 @@ def test_run_scout_logs_sort_order(tmp_path, monkeypatch):
     account = _account(tmp_path, monkeypatch)
     monkeypatch.setattr(fetcher, "load_config", lambda: _cfg(daily_read_limit=50))
     monkeypatch.setattr(
-        orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("富士S",), ("重賞",)]
+        orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today, now=None: [("富士S",), ("重賞",)]
     )
 
     def _fake_collect(account, conn, cfg, keyword_groups, stats=None):
@@ -300,7 +348,7 @@ def test_run_scout_appends_ranking_log_with_match_status_and_sort_order(tmp_path
     account = _account(tmp_path, monkeypatch)
     now = datetime.now(orchestrator.JST)
     monkeypatch.setattr(fetcher, "load_config", lambda: _cfg(daily_read_limit=50))
-    monkeypatch.setattr(orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("富士S",)])
+    monkeypatch.setattr(orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today, now=None: [("富士S",)])
     monkeypatch.setattr(fetcher, "enrich_followers", lambda account, ids: {})
     reasons = {
         "matched": None,
