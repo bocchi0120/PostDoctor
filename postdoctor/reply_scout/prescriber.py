@@ -359,6 +359,15 @@ def generate_drafts(
             drafts.append(combined[:MAX_DRAFT_LEN])
     return drafts
 
+def prediction_status_for(skip_reason: str | None) -> str:
+    """find_match()の不一致理由 -> 表示・記録用の照合結果の文言（Noneは照合できた）。"""
+    if skip_reason is None:
+        return db.PREDICTION_STATUS_MATCHED
+    if skip_reason in (prediction_data.REASON_TIME_MISMATCH, prediction_data.REASON_RESULT_PENDING):
+        return db.PREDICTION_STATUS_TIME_MISMATCH
+    return db.PREDICTION_STATUS_NO_MATCH
+
+
 def draft_top_candidates(
     account: Account, conn, cfg: ScoutConfig, log: list[str] | None = None
 ) -> int:
@@ -388,14 +397,7 @@ def draft_top_candidates(
             created_at=ranked.candidate.created_at, now=now,
         )
         if match is None:
-            status = (
-                db.PREDICTION_STATUS_TIME_MISMATCH
-                if skip_reason in (
-                    prediction_data.REASON_TIME_MISMATCH, prediction_data.REASON_RESULT_PENDING
-                )
-                else db.PREDICTION_STATUS_NO_MATCH
-            )
-            db.set_prediction_status(conn, ranked.candidate.id, status)
+            db.set_prediction_status(conn, ranked.candidate.id, prediction_status_for(skip_reason))
             continue
         db.clear_prediction_status(conn, ranked.candidate.id)
         drafts = generate_drafts(

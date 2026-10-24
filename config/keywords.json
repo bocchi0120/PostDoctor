@@ -1,5 +1,6 @@
 {
-  "keywords": ["重賞", "競馬予想"],
+  "keywords": ["重賞"],
+  "search_sort_order": {"default": "relevancy", "recency_keywords": []},
   "auto_graded_races": {"enabled": true, "grades": ["A", "B", "C"], "max_races": 4},
   "race_aliases": {
     "産経賞オールカマー": ["オールカマー"],

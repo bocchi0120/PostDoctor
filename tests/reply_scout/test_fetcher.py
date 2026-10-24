@@ -25,6 +25,32 @@ def test_load_config_defaults_and_new_fields(tmp_path, monkeypatch):
     assert cfg.auto_graded_races is False
     assert cfg.race_aliases == {}
     assert cfg.max_graded_races == 4
+    # 並び順の設定が無ければ全検索語を関連度順
+    assert cfg.search_sort_order == "relevancy"
+    assert cfg.recency_keywords == ()
+
+
+def test_load_config_reads_search_sort_order(tmp_path, monkeypatch):
+    keywords_path = tmp_path / "keywords.json"
+    keywords_path.write_text(json.dumps({
+        "keywords": ["重賞"],
+        "search_sort_order": {"default": "recency", "recency_keywords": ["重賞", "", 3]},
+    }), encoding="utf-8")
+    monkeypatch.setattr(fetcher, "KEYWORDS_PATH", keywords_path)
+    cfg = fetcher.load_config()
+    assert cfg.search_sort_order == "recency"
+    assert cfg.recency_keywords == ("重賞",)
+
+
+def test_load_config_rejects_unknown_sort_order(tmp_path, monkeypatch):
+    """綴り違いで黙って新しい順に戻らないよう、未知の並び順はエラーにする。"""
+    keywords_path = tmp_path / "keywords.json"
+    keywords_path.write_text(json.dumps({
+        "keywords": ["重賞"], "search_sort_order": {"default": "relevance"},
+    }), encoding="utf-8")
+    monkeypatch.setattr(fetcher, "KEYWORDS_PATH", keywords_path)
+    with pytest.raises(RuntimeError, match="search_sort_order"):
+        fetcher.load_config()
 
 
 def test_load_config_reads_ng_words_and_analysis_terms(tmp_path, monkeypatch):
@@ -279,9 +305,9 @@ def test_collect_candidates_records_per_keyword_stats(tmp_path, monkeypatch):
 
     suffix = " -is:retweet -is:reply lang:ja"
     assert stats == [
-        db.SearchStat("A", "A" + suffix, 10, 3, 1, 1, 1, 0),
-        db.SearchStat("B", "(B OR Bステークス)" + suffix, 13, 2, 1, 0, 0, 1),
-        db.SearchStat("C", "C" + suffix, 25, 0, 0, 0, 0, 0),
+        db.SearchStat("A", "A" + suffix, 10, 3, 1, 1, 1, 0, db.SORT_RELEVANCY),
+        db.SearchStat("B", "(B OR Bステークス)" + suffix, 13, 2, 1, 0, 0, 1, db.SORT_RELEVANCY),
+        db.SearchStat("C", "C" + suffix, 25, 0, 0, 0, 0, 0, db.SORT_RELEVANCY),
     ]
     # 内訳は実際の読み取り数・保存数と一致する
     assert sum(s.read_count for s in stats) == read_count == 5
@@ -428,9 +454,9 @@ class _KwargsClient:
         return _Resp([tweet], users=[_User("1", "u")])
 
 
-def test_collect_candidates_sends_relevancy_only_for_listed_groups(tmp_path, monkeypatch):
-    """relevancy_groupsに含まれる組だけsort_order=relevancyを送り、他はsort_orderを送らない
-    （従来どおりのリクエスト=API既定の新しい順）。並び順は内訳にも残る。"""
+def test_collect_candidates_sends_relevancy_for_all_groups_by_default(tmp_path, monkeypatch):
+    """既定（search_sort_order未設定）では全ての検索語でsort_order=relevancyを送る。
+    並び順は内訳にも残る。"""
     from postdoctor import config
 
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
@@ -440,15 +466,31 @@ def test_collect_candidates_sends_relevancy_only_for_listed_groups(tmp_path, mon
     stats: list[db.SearchStat] = []
     with db.connect(_account()) as conn:
         fetcher.collect_candidates(
-            _account(), conn, _scout_cfg(daily_read_limit=30, min_likes=5), groups,
-            stats=stats, relevancy_groups={("富士S", "富士ステークス")},
+            _account(), conn, _scout_cfg(daily_read_limit=30, min_likes=5), groups, stats=stats,
         )
 
-    assert [kw.get("sort_order") for _q, kw in client.calls] == ["relevancy", None, None]
-    assert ["sort_order" in kw for _q, kw in client.calls] == [True, False, False]
-    assert [s.sort_order for s in stats] == ["relevancy", "recency", "recency"]
+    assert [kw.get("sort_order") for _q, kw in client.calls] == ["relevancy"] * 3
+    assert [s.sort_order for s in stats] == ["relevancy"] * 3
 
-    # 読み取り件数の割り振り(max_results)は、関連度順を指定しない場合と同じ
+
+def test_collect_candidates_recency_keywords_send_no_sort_order(tmp_path, monkeypatch):
+    """recency_keywordsに挙げた語（表記の組のどれか）だけ新しい順。新しい順の検索には
+    sort_orderを送らない（API既定のrecency）。読み取り件数の割り振りは並び順によらず同じ。"""
+    from postdoctor import config
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    client = _KwargsClient()
+    monkeypatch.setattr(fetcher, "build_client", lambda account: client)
+    groups = [("富士S", "富士ステークス"), ("スワンS",), ("重賞",)]
+    cfg = _scout_cfg(daily_read_limit=30, min_likes=5, recency_keywords=("富士ステークス", "重賞"))
+    stats: list[db.SearchStat] = []
+    with db.connect(_account()) as conn:
+        fetcher.collect_candidates(_account(), conn, cfg, groups, stats=stats)
+
+    assert [kw.get("sort_order") for _q, kw in client.calls] == [None, "relevancy", None]
+    assert ["sort_order" in kw for _q, kw in client.calls] == [False, True, False]
+    assert [s.sort_order for s in stats] == ["recency", "relevancy", "recency"]
+
     plain = _KwargsClient()
     monkeypatch.setattr(fetcher, "build_client", lambda account: plain)
     monkeypatch.setattr(config, "DATA_DIR", tmp_path / "plain")
@@ -460,12 +502,15 @@ def test_collect_candidates_sends_relevancy_only_for_listed_groups(tmp_path, mon
     ]
 
 
-def test_collect_candidates_without_relevancy_groups_sends_no_sort_order(tmp_path, monkeypatch):
+def test_collect_candidates_default_recency_sends_no_sort_order(tmp_path, monkeypatch):
+    """search_sort_order.default=recencyなら全検索語を従来どおりのリクエストに戻せる。"""
     from postdoctor import config
 
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     client = _KwargsClient()
     monkeypatch.setattr(fetcher, "build_client", lambda account: client)
     with db.connect(_account()) as conn:
-        fetcher.collect_candidates(_account(), conn, _scout_cfg(), [("重賞",)])
+        fetcher.collect_candidates(
+            _account(), conn, _scout_cfg(search_sort_order="recency"), [("重賞",), ("秋華賞",)]
+        )
     assert all("sort_order" not in kw for _q, kw in client.calls)

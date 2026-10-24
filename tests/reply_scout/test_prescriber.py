@@ -923,3 +923,10 @@ def test_draft_top_candidates_records_result_pending_as_time_skip_and_retries_la
     texts = [r[0] for r in conn.execute("SELECT draft_text FROM drafts ORDER BY variant")]
     assert len(texts) == 2 and all("結果は1着" in t for t in texts)
     assert conn.execute("SELECT prediction_status FROM candidates WHERE id='s'").fetchone()[0] is None
+
+
+def test_prediction_status_for_maps_find_match_reasons():
+    assert prescriber.prediction_status_for(None) == "照合できた"
+    assert prescriber.prediction_status_for(prediction_data.REASON_NO_MATCH) == "予測データ未投入"
+    assert prescriber.prediction_status_for(prediction_data.REASON_TIME_MISMATCH) == "時制スキップ"
+    assert prescriber.prediction_status_for(prediction_data.REASON_RESULT_PENDING) == "時制スキップ"

@@ -115,6 +115,15 @@ CREATE TABLE IF NOT EXISTS discarded_reactions (
     reaction_head  TEXT NOT NULL,     -- 破棄した反応文の先頭20字(全文は残さない)
     recorded_at    TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ranking_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_at        TEXT NOT NULL,   -- scout実行時刻(UTC)。scout_searches.run_atと同じ値(検索が無い回は記録時刻)
+    rank          INTEGER NOT NULL,
+    candidate_id  TEXT NOT NULL,
+    score         REAL NOT NULL,
+    match_status  TEXT NOT NULL,   -- 照合できた/時制スキップ/予測データ未投入(順位づけ時点の判定)
+    sort_order    TEXT             -- その候補を拾った検索の並び順。拾った検索が記録より前ならNULL
+);
 """
 
 # candidatesテーブルへの追加カラム（このプロジェクト初のスキーマ変更）。
@@ -465,6 +474,8 @@ def get_draftable_candidates(conn: sqlite3.Connection, limit: int) -> list[Ranke
 # 時制ミスマッチ等の理由で見送った」のかを区別できるようにする。
 PREDICTION_STATUS_NO_MATCH = "予測データ未投入"
 PREDICTION_STATUS_TIME_MISMATCH = "時制スキップ"
+# ranking_log.match_status専用（candidates.prediction_statusでは照合できた候補はNULL）
+PREDICTION_STATUS_MATCHED = "照合できた"
 
 
 def set_prediction_status(conn: sqlite3.Connection, candidate_id: str, status: str) -> None:
@@ -717,5 +728,65 @@ def add_usage(conn: sqlite3.Connection, kind: str, count: int) -> None:
         ON CONFLICT(date, kind) DO UPDATE SET count = count + excluded.count
         """,
         (today, kind, count),
+    )
+    conn.commit()
+
+
+@dataclass(frozen=True)
+class RankingLogRow:
+    rank: int
+    candidate_id: str
+    score: float
+    match_status: str
+    sort_order: str | None
+
+
+def candidate_sort_orders(conn: sqlite3.Connection, candidate_ids: list[str]) -> dict[str, str]:
+    """候補ID -> その候補を拾った検索の並び順。
+
+    candidatesには並び順の列が無いので、scout_searchesのうち検索語が同じで、実行時刻が
+    候補の保存時刻(fetched_at)の直後(60秒以内)の行から引く（run_scout()は候補を保存して
+    から検索内訳を保存するので、run_atはfetched_atと同じか少し後になる）。該当する行が無い
+    候補（scout_searchesの追加前に拾った候補）は含めない。sort_order列の追加前の行(NULL)は
+    API既定の新しい順で検索していたので"recency"とする。
+    """
+    if not candidate_ids:
+        return {}
+    placeholders = ",".join("?" * len(candidate_ids))
+    rows = conn.execute(
+        f"""
+        SELECT c.id, COALESCE(s.sort_order, ?)
+        FROM candidates c
+        JOIN scout_searches s
+          ON s.keyword = c.keyword
+         AND (julianday(s.run_at) - julianday(c.fetched_at)) * 86400 BETWEEN 0 AND 60
+        WHERE c.id IN ({placeholders})
+        ORDER BY s.run_at DESC
+        """,
+        (SORT_RECENCY, *candidate_ids),
+    ).fetchall()
+    result: dict[str, str] = {}
+    for candidate_id, sort_order in rows:
+        result.setdefault(candidate_id, sort_order)
+    return result
+
+
+def save_ranking_log(
+    conn: sqlite3.Connection, rows: list[RankingLogRow], run_at: str | None = None
+) -> None:
+    """scout1回分の順位づけ結果を追記する（既存の行は変えない）。
+
+    candidates.rankは毎回上書きされ、score_factorsも候補ごとに最新の値しか残らないため、
+    過去の実行のTOP10とその照合結果を後から再構成できなかった（2026-10-24）ための記録。
+    """
+    if not rows:
+        return
+    run_at = run_at or _utc_now_iso()
+    conn.executemany(
+        """
+        INSERT INTO ranking_log (run_at, rank, candidate_id, score, match_status, sort_order)
+        VALUES (?,?,?,?,?,?)
+        """,
+        [(run_at, r.rank, r.candidate_id, r.score, r.match_status, r.sort_order) for r in rows],
     )
     conn.commit()

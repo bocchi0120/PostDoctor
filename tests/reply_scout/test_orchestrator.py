@@ -162,7 +162,7 @@ def test_run_scout_logs_planned_and_searched_keywords(tmp_path, monkeypatch):
     )
     seen = {}
 
-    def _fake_collect(account, conn, cfg, keyword_groups, stats=None, relevancy_groups=()):
+    def _fake_collect(account, conn, cfg, keyword_groups, stats=None):
         seen["groups"] = keyword_groups
         return [], 0, [("毎日王冠", 7), ("重賞", 0)]
 
@@ -185,7 +185,7 @@ def test_run_scout_saves_search_stats_and_logs_saved_counts(tmp_path, monkeypatc
         db.SearchStat("重賞", "重賞 -is:retweet", 25, 4, 0, 0, 3, 1),
     ]
 
-    def _fake_collect(account, conn, cfg, keyword_groups, stats=None, relevancy_groups=()):
+    def _fake_collect(account, conn, cfg, keyword_groups, stats=None):
         stats.extend(recorded)
         return [], 0, [("毎日王冠", 10), ("重賞", 4)]
 
@@ -208,7 +208,7 @@ def test_run_scout_records_nothing_when_no_search_ran(tmp_path, monkeypatch):
     monkeypatch.setattr(orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("重賞",)])
     monkeypatch.setattr(
         fetcher, "collect_candidates",
-        lambda account, conn, cfg, groups, stats=None, relevancy_groups=(): ([], 0, []),
+        lambda account, conn, cfg, groups, stats=None: ([], 0, []),
     )
     log = orchestrator.run_scout(account)
     assert log[2] == "検索語ごとの保存: なし"
@@ -255,7 +255,7 @@ def test_run_scout_ranks_only_posts_within_max_age_days(tmp_path, monkeypatch):
     monkeypatch.setattr(orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("重賞",)])
     monkeypatch.setattr(
         fetcher, "collect_candidates",
-        lambda account, conn, cfg, groups, stats=None, relevancy_groups=(): ([], 0, []),
+        lambda account, conn, cfg, groups, stats=None: ([], 0, []),
     )
     monkeypatch.setattr(fetcher, "enrich_followers", lambda account, ids: {})
 
@@ -268,51 +268,14 @@ def test_run_scout_ranks_only_posts_within_max_age_days(tmp_path, monkeypatch):
 
 
 
-def test_relevancy_keyword_groups_are_current_weekend_graded_races_only(tmp_path):
-    """関連度順は当週末の重賞（自動キーワード）だけ。前週末の重賞と固定語は新しい順のまま。"""
-    import json
-    from dataclasses import replace
-    from datetime import date
-
-    from postdoctor.reply_scout import prediction_data
-
-    out = tmp_path / "output"
-    out.mkdir()
-    def _race(key, day, name, grade):
-        return {"race_key": key, "kaisai_date": day, "jyo_name": "東京", "race_num": "11",
-                "race_name": name, "grade_code": grade, "horses": []}
-    (out / "predictions_20261017.json").write_text(json.dumps({"races": [
-        _race("R1", "20261017", "富士ステークス", "C"), _race("R2", "20261018", "秋華賞", "A"),
-    ]}, ensure_ascii=False), encoding="utf-8")
-    (out / "predictions_20261012.json").write_text(json.dumps({"races": [
-        _race("R3", "20261012", "スワンステークス", "B"),
-    ]}, ensure_ascii=False), encoding="utf-8")
-    cfg = replace(
-        _cfg(daily_read_limit=50), auto_graded_races=True, keywords=["重賞"],
-        rakuba_output_dir=str(out),
-    )
-    pcfg = prediction_data.load_prediction_config(str(out))
-    today = date(2026, 10, 17)
-
-    groups = orchestrator.scout_keyword_groups(cfg, pcfg, today)
-    relevancy = orchestrator.relevancy_keyword_groups(cfg, pcfg, today)
-    assert relevancy == {("秋華賞",), ("富士S", "富士ステークス")}
-    assert [g for g in groups if g not in relevancy] == [("スワンS", "スワンステークス"), ("重賞",)]
-    # 自動キーワードを使わない設定なら関連度順も使わない
-    assert orchestrator.relevancy_keyword_groups(replace(cfg, auto_graded_races=False), pcfg, today) == set()
-
-
-def test_run_scout_passes_relevancy_groups_and_logs_sort_order(tmp_path, monkeypatch):
+def test_run_scout_logs_sort_order(tmp_path, monkeypatch):
     account = _account(tmp_path, monkeypatch)
     monkeypatch.setattr(fetcher, "load_config", lambda: _cfg(daily_read_limit=50))
     monkeypatch.setattr(
         orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("富士S",), ("重賞",)]
     )
-    monkeypatch.setattr(orchestrator, "relevancy_keyword_groups", lambda cfg, pcfg, today: {("富士S",)})
-    seen = {}
 
-    def _fake_collect(account, conn, cfg, keyword_groups, stats=None, relevancy_groups=()):
-        seen["relevancy"] = relevancy_groups
+    def _fake_collect(account, conn, cfg, keyword_groups, stats=None):
         stats.extend([
             db.SearchStat("富士S", "q1", 25, 10, 1, 0, 9, 0, db.SORT_RELEVANCY),
             db.SearchStat("重賞", "q2", 25, 10, 0, 0, 10, 0),
@@ -321,8 +284,87 @@ def test_run_scout_passes_relevancy_groups_and_logs_sort_order(tmp_path, monkeyp
 
     monkeypatch.setattr(fetcher, "collect_candidates", _fake_collect)
     log = orchestrator.run_scout(account)
-    assert seen["relevancy"] == {("富士S",)}
     assert log[2] == (
         "検索語ごとの保存: 富士S[関連度順] 読取10→保存1（いいね等不足9）, "
         "重賞 読取10→保存0（いいね等不足10）"
     )
+
+
+def test_run_scout_appends_ranking_log_with_match_status_and_sort_order(tmp_path, monkeypatch):
+    """順位づけの結果を、照合結果と拾った検索の並び順つきでranking_logに追記する。
+    2回実行すると2回分の行が残り、1回目の行は変わらない。"""
+    from datetime import datetime, timedelta
+
+    from postdoctor.reply_scout import prediction_data
+
+    account = _account(tmp_path, monkeypatch)
+    now = datetime.now(orchestrator.JST)
+    monkeypatch.setattr(fetcher, "load_config", lambda: _cfg(daily_read_limit=50))
+    monkeypatch.setattr(orchestrator, "scout_keyword_groups", lambda cfg, pcfg, today: [("富士S",)])
+    monkeypatch.setattr(fetcher, "enrich_followers", lambda account, ids: {})
+    reasons = {
+        "matched": None,
+        "timeskip": prediction_data.REASON_TIME_MISMATCH,
+        "pending": prediction_data.REASON_RESULT_PENDING,
+        "nomatch": prediction_data.REASON_NO_MATCH,
+        "old": prediction_data.REASON_NO_MATCH,
+    }
+    monkeypatch.setattr(
+        prediction_data, "find_match",
+        lambda text, *args, **kwargs: (object() if reasons[text] is None else None, reasons[text]),
+    )
+
+    def _cand(cid, likes):
+        return db.Candidate(
+            id=cid, text=cid, author_id=f"a-{cid}", author_screen_name=cid,
+            created_at=(now - timedelta(hours=1)).isoformat(), likes=likes, retweets=0,
+            replies=0, quotes=0, keyword="富士S",
+        )
+
+    with db.connect(account) as conn:
+        db.insert_candidates(conn, [_cand("old", 1)])  # 検索内訳の記録より前に拾った候補
+        conn.execute("UPDATE candidates SET fetched_at='2026-07-17 06:42:26' WHERE id='old'")
+        conn.commit()
+
+    def _fake_collect(account, conn, cfg, keyword_groups, stats=None):
+        stats.append(db.SearchStat("富士S", "q1", 10, 10, 4, 0, 6, 0, db.SORT_RELEVANCY))
+        cands = [_cand("matched", 40), _cand("timeskip", 30), _cand("pending", 20), _cand("nomatch", 10)]
+        return cands, 10, [("富士S", 10)]
+
+    monkeypatch.setattr(fetcher, "collect_candidates", _fake_collect)
+    orchestrator.run_scout(account)
+
+    with db.connect(account) as conn:
+        rows = conn.execute(
+            "SELECT run_at, rank, candidate_id, match_status, sort_order FROM ranking_log ORDER BY rank"
+        ).fetchall()
+        search_run_at = conn.execute("SELECT run_at FROM scout_searches").fetchone()[0]
+    assert {r[0] for r in rows} == {search_run_at}
+    assert [(r[1], r[2], r[3], r[4]) for r in rows] == [
+        (1, "matched", "照合できた", "relevancy"),
+        (2, "timeskip", "時制スキップ", "relevancy"),
+        (3, "pending", "時制スキップ", "relevancy"),
+        (4, "nomatch", "予測データ未投入", "relevancy"),
+        (5, "old", "予測データ未投入", None),
+    ]
+
+    # 2回目: 検索なし（上限到達）でも順位づけは記録され、1回目の行は残る
+    with db.connect(account) as conn:
+        conn.execute("UPDATE candidates SET status='見送り' WHERE id='old'")
+        conn.commit()
+    monkeypatch.setattr(
+        fetcher, "collect_candidates", lambda account, conn, cfg, groups, stats=None: ([], 0, [])
+    )
+    monkeypatch.setattr(db, "_utc_now_iso", lambda: "2099-01-01T00:00:00+00:00")  # 1回目と別の時刻
+    orchestrator.run_scout(account)
+    with db.connect(account) as conn:
+        counts = [
+            n for (n,) in conn.execute(
+                "SELECT COUNT(*) FROM ranking_log GROUP BY run_at ORDER BY MIN(id)"
+            )
+        ]
+        first = conn.execute(
+            "SELECT candidate_id FROM ranking_log WHERE run_at=? ORDER BY rank", (search_run_at,)
+        ).fetchall()
+    assert counts == [5, 4]
+    assert [cid for (cid,) in first] == ["matched", "timeskip", "pending", "nomatch", "old"]

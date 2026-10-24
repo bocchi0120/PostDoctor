@@ -12,7 +12,6 @@ DB へのアクセスは行わず、正規化した Candidate のリストを返
 from __future__ import annotations
 
 import json
-from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import timedelta, timezone
 
@@ -57,6 +56,10 @@ class ScoutConfig:
     rakuba_cancelled_races_path: str = ""
     # ランキング対象にする候補の投稿からの日数（orchestrator.run_scout()）
     candidate_max_age_days: int = DEFAULT_CANDIDATE_MAX_AGE_DAYS
+    # 検索の並び順（keywords.jsonの"search_sort_order"）。既定は全検索語で関連度順。
+    # recency_keywordsに挙げた語（表記の組のどれか）だけ新しい順に戻す
+    search_sort_order: str = db.SORT_RELEVANCY
+    recency_keywords: tuple[str, ...] = ()
 
 
 MIN_RESULTS_PER_QUERY = 10   # X API v2 recent search の max_results 下限
@@ -90,11 +93,28 @@ def _load_word_list(path, key: str) -> list[str]:
     return raw.get(key, [])
 
 
+def _load_sort_order(raw) -> tuple[str, tuple[str, ...]]:
+    """keywords.jsonの"search_sort_order": {"default": "relevancy", "recency_keywords": [...]}。
+
+    無ければ全検索語を関連度順（2026-10-24から。それまでは当週末の重賞だけ関連度順）。
+    並び順の綴りを誤ると黙って新しい順に戻ってしまうので、未知の値はエラーにする。
+    """
+    raw = raw or {}
+    default = raw.get("default", db.SORT_RELEVANCY)
+    if default not in (db.SORT_RELEVANCY, db.SORT_RECENCY):
+        raise RuntimeError(
+            f"search_sort_order.default は relevancy か recency を指定してください: {default!r}"
+        )
+    recency = tuple(k for k in raw.get("recency_keywords", []) if isinstance(k, str) and k)
+    return default, recency
+
+
 def load_config() -> ScoutConfig:
     if not KEYWORDS_PATH.exists():
         raise RuntimeError(f"キーワード設定ファイルが見つかりません: {KEYWORDS_PATH}")
     raw = json.loads(KEYWORDS_PATH.read_text(encoding="utf-8"))
     auto = raw.get("auto_graded_races") or {}
+    sort_order, recency_keywords = _load_sort_order(raw.get("search_sort_order"))
     return ScoutConfig(
         keywords=raw.get("keywords", []),
         ng_words=_load_word_list(NG_WORDS_PATH, "ng_words"),
@@ -116,6 +136,8 @@ def load_config() -> ScoutConfig:
         candidate_max_age_days=int(
             raw.get("candidate_max_age_days", DEFAULT_CANDIDATE_MAX_AGE_DAYS)
         ),
+        search_sort_order=sort_order,
+        recency_keywords=recency_keywords,
     )
 
 
@@ -126,13 +148,19 @@ def _query_term(variants: tuple[str, ...]) -> str:
     return "(" + " OR ".join(variants) + ")"
 
 
+def sort_order_for(cfg: ScoutConfig, variants: tuple[str, ...]) -> str:
+    """表記の組の検索に使う並び順。組のどれかがrecency_keywordsにあれば新しい順。"""
+    if any(v in cfg.recency_keywords for v in variants):
+        return db.SORT_RECENCY
+    return cfg.search_sort_order
+
+
 def collect_candidates(
     account: Account,
     conn,
     cfg: ScoutConfig,
     keyword_groups: list[tuple[str, ...]] | None = None,
     stats: list[db.SearchStat] | None = None,
-    relevancy_groups: Collection[tuple[str, ...]] = (),
 ) -> tuple[list[db.Candidate], int, list[tuple[str, int]]]:
     """キーワード検索で新規候補を集める。
 
@@ -149,8 +177,8 @@ def collect_candidates(
     stats: リストを渡すと、検索1回ごとの内訳（読み取り・保存・落とした理由別の件数）を
     追記する。記録用で、検索や候補の選別には影響しない。
 
-    relevancy_groups: ここに含まれる表記の組だけ sort_order=relevancy（関連度順）で検索する。
-    それ以外は sort_order を送らない（API既定の recency=新しい順。従来どおりのリクエスト）。
+    並び順は sort_order_for() で組ごとに決める（既定は関連度順）。新しい順の組には
+    sort_order を送らない（API既定の recency。関連度順の試験前と同じリクエスト）。
     読み取り件数の割り振り・min_likes等の選別は並び順によらず同じ。
     """
     already_read_today = db.get_today_usage(conn, "tweet_read")
@@ -175,7 +203,7 @@ def collect_candidates(
         )
         keyword = variants[0]
         query = f"{_query_term(variants)} -is:retweet -is:reply lang:ja"
-        sort_order = db.SORT_RELEVANCY if variants in relevancy_groups else db.SORT_RECENCY
+        sort_order = sort_order_for(cfg, variants)
         extra = {"sort_order": db.SORT_RELEVANCY} if sort_order == db.SORT_RELEVANCY else {}
         resp = client.search_recent_tweets(
             query=query,

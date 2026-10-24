@@ -350,3 +350,57 @@ def test_init_db_adds_sort_order_to_existing_scout_searches_keeping_old_rows():
         db.SearchStat("スワンS", "q", 10, 10, 2, 0, 8, 0, "recency")
     ]
     connection.close()
+
+
+def test_save_ranking_log_appends_rows(conn):
+    db.save_ranking_log(conn, [
+        db.RankingLogRow(1, "c1", 0.5, db.PREDICTION_STATUS_MATCHED, db.SORT_RELEVANCY),
+        db.RankingLogRow(2, "c2", 0.3, db.PREDICTION_STATUS_NO_MATCH, None),
+    ], run_at="2026-10-24T00:00:00+00:00")
+    db.save_ranking_log(conn, [
+        db.RankingLogRow(1, "c2", 0.4, db.PREDICTION_STATUS_TIME_MISMATCH, "recency"),
+    ], run_at="2026-10-25T00:00:00+00:00")
+    db.save_ranking_log(conn, [])  # 空なら何もしない
+    rows = conn.execute(
+        "SELECT run_at, rank, candidate_id, score, match_status, sort_order FROM ranking_log ORDER BY id"
+    ).fetchall()
+    assert rows == [
+        ("2026-10-24T00:00:00+00:00", 1, "c1", 0.5, "照合できた", "relevancy"),
+        ("2026-10-24T00:00:00+00:00", 2, "c2", 0.3, "予測データ未投入", None),
+        ("2026-10-25T00:00:00+00:00", 1, "c2", 0.4, "時制スキップ", "recency"),
+    ]
+
+
+def test_init_db_adds_ranking_log_to_existing_db_without_touching_other_tables():
+    connection = sqlite3.connect(":memory:")
+    db.init_db(connection)
+    db.insert_candidates(connection, [_candidate("keep")])
+    connection.execute("DROP TABLE ranking_log")
+    connection.commit()
+    db.init_db(connection)
+    assert connection.execute("SELECT COUNT(*) FROM ranking_log").fetchone()[0] == 0
+    assert connection.execute("SELECT id FROM candidates").fetchall() == [("keep",)]
+
+
+def test_candidate_sort_orders_matches_search_run_right_after_fetch(conn):
+    """候補を拾った検索の並び順は、同じ検索語で保存直後(60秒以内)の検索内訳から引く。"""
+    db.insert_candidates(conn, [_candidate(c) for c in ("rel", "legacy", "late", "other_kw", "none")])
+    conn.executemany("UPDATE candidates SET fetched_at=?, keyword=? WHERE id=?", [
+        ("2026-10-24T00:14:28+00:00", "富士S", "rel"),
+        ("2026-10-16T10:21:20+00:00", "秋華賞", "legacy"),
+        ("2026-10-24T00:10:00+00:00", "富士S", "late"),       # 検索内訳が4分後: 別の実行
+        ("2026-10-24T00:14:28+00:00", "菊花賞", "other_kw"),  # 同時刻でも検索語が違う
+        ("2026-07-17 06:42:26", "競馬", "none"),               # 記録開始前の旧形式
+    ])
+    conn.execute(
+        "INSERT INTO scout_searches (run_at, position, keyword, query, max_results, read_count,"
+        " saved_count, dropped_known, dropped_low_engagement, dropped_duplicate, sort_order)"
+        " VALUES ('2026-10-16T10:21:21+00:00', 0, '秋華賞', 'q', 10, 10, 0, 0, 10, 0, NULL)"
+    )
+    db.save_scout_searches(conn, [db.SearchStat("富士S", "q", 10, 10, 1, 0, 9, 0, db.SORT_RELEVANCY)])
+    conn.execute("UPDATE scout_searches SET run_at='2026-10-24T00:14:29+00:00' WHERE keyword='富士S'")
+    conn.commit()
+
+    orders = db.candidate_sort_orders(conn, ["rel", "legacy", "late", "other_kw", "none"])
+    assert orders == {"rel": "relevancy", "legacy": "recency"}
+    assert db.candidate_sort_orders(conn, []) == {}

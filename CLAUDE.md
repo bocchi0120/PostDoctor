@@ -178,7 +178,9 @@ instead.
 - `config/keywords.json` — reply_scout search keywords, `daily_read_limit`, `min_likes`,
   `top_user_lookup_limit`, `draft_top_n`, `claude_model`, `rakuba_output_dir` (path to Rakuba's
   `backend/output/`), `trusted_authors`, optional `candidate_max_age_days` (default 7 = X recent
-  search's window; older candidates are kept in the DB but excluded from ranking). `draft_top_n`
+  search's window; older candidates are kept in the DB but excluded from ranking), optional
+  `search_sort_order` (`{"default": "relevancy", "recency_keywords": [...]}` — X search order per
+  keyword; default relevancy for every keyword, listed keywords fall back to newest-first). `draft_top_n`
   must be kept in sync with the dashboard's display count (`top_n=10`, hardcoded in `orchestrator.run_scout()`) — there is no shared constant
   enforcing this. `trusted_authors` starts curated (not empty) as of 2026-08-03; add an account only
   once it has (a) actually replied to one of our sent replies (`other_reply_count>0`, surfaced via

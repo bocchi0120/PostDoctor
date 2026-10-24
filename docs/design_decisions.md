@@ -263,6 +263,21 @@
     実行ログでは「富士S[関連度順] 読取10→保存…」と出す。比べ方:
     `SELECT COALESCE(sort_order,'recency'), SUM(read_count), SUM(saved_count) FROM scout_searches
     GROUP BY 1`。数回分ためて、保存率が上がらなければ戻す。
+    2026-10-24: 4回分（10/16〜10/24、19検索）で比べると、保存率は新しい順9%（156件中14件）に
+    対し関連度順36%（44件中16件）、保存分のいいね平均は27.1対77.4、馬名照合できた候補は2件対6件。
+    → **全検索語を関連度順に**した。例外は設定で選べる: `config/keywords.json`の
+    `"search_sort_order": {"default": "relevancy", "recency_keywords": [...]}`
+    （`recency_keywords`に挙げた語＝表記の組のどれかは新しい順。`default`を`recency`にすれば
+    全語を従来どおりに戻せる。未知の値はエラー）。`fetcher.sort_order_for()`で組ごとに決め、
+    当週末の重賞だけを選んでいた`orchestrator.relevancy_keyword_groups()`と
+    `collect_candidates(relevancy_groups=)`は削除。新しい順の検索には従来どおりsort_orderを送らない。
+    同時に固定語「競馬予想」を外した（`keywords`は「重賞」のみ）。10/19に一度検索され
+    13件読んで保存1件（地方の名古屋9R、Rakubaの対象外）。読み取りの割り振りは従来どおり
+    残数を検索語で等分する（例: 自動の重賞2つ＋「重賞」なら16・17・17件）。
+    テスト: `test_collect_candidates_sends_relevancy_for_all_groups_by_default`、
+    `test_collect_candidates_recency_keywords_send_no_sort_order`、
+    `test_collect_candidates_default_recency_sends_no_sort_order`、
+    `test_load_config_reads_search_sort_order`、`test_load_config_rejects_unknown_sort_order`。
 
 17. **反応文に、データに無い主張が入り込む（2026-10-13発覚）**: 過去の反応文351件
     （現行DB＋バックアップ、重複除去）を全件確認し、既存の2フィルタ（数字・マーク、一致主張）を
@@ -411,6 +426,23 @@
     `test_generate_drafts_discards_mojibake_variant_and_records_it`、
     `test_mojibake_re_catches_replacement_and_control_characters`。
 
+23. **過去の実行のTOP10とその照合結果を後から再構成できなかった（2026-10-24発覚）**:
+    「直近3回のTOP10のうち、Rakuba予測と照合できた割合」を出そうとしたところ、`candidates.rank`は
+    scoutのたびに全件クリアして上書き、`score_factors`も候補ごとに最新の値しか残らないため、
+    過去の回のTOPはスコアの計算時刻からの推定でしか出せなかった（10/17の回は3件しか特定できず）。
+    照合結果も、下書き生成時に`candidates.prediction_status`へ書くだけで（照合できた候補はNULL）、
+    順位づけの時点での判定は残っていなかった。
+    → 修正: `ranking_log`テーブルを追加し、`run_scout()`が1回の実行につき順位づけした全件
+    （上位10件）を追記する。列は`run_at`（`scout_searches.run_at`と同じ値。検索が無かった回は
+    記録時刻）、`rank`、`candidate_id`、`score`、`match_status`（照合できた/時制スキップ/
+    予測データ未投入。下書き生成と同じ`find_match()`の判定を`prescriber.prediction_status_for()`で
+    文言にする）、`sort_order`（その候補を拾った検索の並び順。`db.candidate_sort_orders()`が
+    同じ検索語で保存直後60秒以内の`scout_searches`の行から引く。記録開始前に拾った候補はNULL）。
+    追記のみで、既存の行・テーブル・順位・候補の行は変えない。集計例:
+    `SELECT run_at, match_status, COUNT(*) FROM ranking_log GROUP BY 1, 2`。
+    テスト: `test_run_scout_appends_ranking_log_with_match_status_and_sort_order`、
+    `test_save_ranking_log_appends_rows`、`test_candidate_sort_orders_matches_search_run_right_after_fetch`。
+
 ## 5. スコアリング・候補選定の判断
 
 - NGワードは2リスト: 煽り系（スコア半減）と勧誘・宣伝系「限定/有料/教える等」（ハード除外）。
@@ -446,8 +478,8 @@
     「当週末」は土〜火ならその週末、水〜金なら次の週末（`current_weekend_start()`）。
     金〜日は、前週末のG1（結果が出て話題が落ち着いた後）より当週末のG2/G3を先にする
     （2026-10-05変更。当初はグレード優先で、土曜に前週末のG1が当週末の重賞より前に来た）。
-    最大4レース（`auto_graded_races.max_races`）。検索回数が足りない週は固定語（「重賞」「競馬予想」）
-    の方を後ろから切り捨てる。
+    最大4レース（`auto_graded_races.max_races`）。検索回数が足りない週は固定語（「重賞」。
+    「競馬予想」は2026-10-24に外した）の方を後ろから切り捨てる。
   - `cancelled_races.json`の中止日・場のレースは除外し、代替開催日の新しいキーだけを残す。
     同じ表記は1回の検索にまとめる。
   - 表記: X検索は「〜S」と「〜ステークス」を同一視しない（2026-10-05、件数API

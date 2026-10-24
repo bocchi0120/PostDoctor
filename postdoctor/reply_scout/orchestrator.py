@@ -44,28 +44,6 @@ def scout_keyword_groups(
     return groups
 
 
-def relevancy_keyword_groups(
-    cfg: fetcher.ScoutConfig, pcfg: prediction_data.PredictionConfig, today: date
-) -> set[tuple[str, ...]]:
-    """関連度順(sort_order=relevancy)で検索する表記の組: 自動キーワードのうち当週末の重賞だけ。
-
-    試験運用（2026-10-17）。前週末の重賞と固定語（「重賞」等）は従来どおり新しい順。
-    新しい順だと発走前後の短時間に投稿が集中する当週末の重賞で、いいね等の少ない直近の
-    投稿ばかりを読んでしまうので、反応の付いた投稿が上に来る並びを試す。
-    """
-    if not cfg.auto_graded_races:
-        return set()
-    cancelled = Path(cfg.rakuba_cancelled_races_path) if cfg.rakuba_cancelled_races_path else None
-    plan = prediction_data.graded_race_keyword_plan(
-        pcfg, today,
-        cancelled_path=cancelled,
-        aliases=cfg.race_aliases,
-        grades=cfg.graded_grades,
-        max_races=cfg.max_graded_races,
-    )
-    return {variants for variants, current_weekend in plan if current_weekend}
-
-
 def _search_stat_summary(stat: db.SearchStat) -> str:
     """「毎日王冠 読取10→保存2（いいね等不足7・既知1）」。落とした理由は0件のものを省く。"""
     reasons = [
@@ -82,6 +60,30 @@ def _search_stat_summary(stat: db.SearchStat) -> str:
     return f"{stat.keyword}{order} 読取{stat.read_count}→保存{stat.saved_count}{detail}"
 
 
+def _ranking_log_rows(
+    conn, pcfg: prediction_data.PredictionConfig, prediction_rows: list, ranked: list
+) -> list[db.RankingLogRow]:
+    """順位づけの記録用に、各候補の照合結果（下書き生成と同じfind_match()の判定）と
+    拾った検索の並び順を添える。記録だけで、順位や候補の行には影響しない。"""
+    if not ranked:
+        return []
+    results = prediction_data.load_race_results(pcfg)
+    confirmed = prediction_data.confirmed_race_keys(results)
+    now = datetime.now(JST)
+    sort_orders = db.candidate_sort_orders(conn, [c.id for c, *_ in ranked])
+    rows = []
+    for c, score, rank, _breakdown in ranked:
+        _match, skip_reason = prediction_data.find_match(
+            c.text, prediction_rows, results, confirmed, created_at=c.created_at, now=now,
+        )
+        rows.append(db.RankingLogRow(
+            rank=rank, candidate_id=c.id, score=score,
+            match_status=prescriber.prediction_status_for(skip_reason),
+            sort_order=sort_orders.get(c.id),
+        ))
+    return rows
+
+
 def run_scout(account: Account) -> list[str]:
     cfg = fetcher.load_config()
     pcfg = prediction_data.load_prediction_config(cfg.rakuba_output_dir)
@@ -90,7 +92,6 @@ def run_scout(account: Account) -> list[str]:
     race_names = frozenset(prediction_data.all_race_names(prediction_rows))
     today = datetime.now(JST).date()
     keyword_groups = scout_keyword_groups(cfg, pcfg, today)
-    relevancy_groups = relevancy_keyword_groups(cfg, pcfg, today)
 
     # recent searchが返す範囲（直近cfg.candidate_max_age_days日）より古い候補はランキング対象外
     posted_since = datetime.now(JST) - timedelta(days=cfg.candidate_max_age_days)
@@ -99,10 +100,9 @@ def run_scout(account: Account) -> list[str]:
     with db.connect(account) as conn:
         candidates, read_count, searched = fetcher.collect_candidates(
             account, conn, cfg, keyword_groups, stats=search_stats,
-            relevancy_groups=relevancy_groups,
         )
         inserted = db.insert_candidates(conn, candidates) if candidates else 0
-        db.save_scout_searches(conn, search_stats)
+        run_at = db.save_scout_searches(conn, search_stats)
         if read_count:
             db.add_usage(conn, "tweet_read", read_count)
 
@@ -124,6 +124,7 @@ def run_scout(account: Account) -> list[str]:
                 breakdown.trusted, breakdown.analytical, breakdown.ng_penalty_applied,
                 breakdown.final_score,
             )
+        db.save_ranking_log(conn, _ranking_log_rows(conn, pcfg, prediction_rows, ranked), run_at)
 
     tweet_cost = read_count * fetcher.TWEET_READ_COST
     user_cost = len(followers) * fetcher.USER_READ_COST
