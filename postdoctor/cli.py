@@ -5,7 +5,7 @@
   python main.py analyze   --account rakuba_ai [--all] [--metric impressions]
   python main.py prescribe --account rakuba_ai [--all]
   python main.py run       --account rakuba_ai [--all]   # fetch -> analyze(全指標) -> prescribe
-  python main.py serve     --account rakuba_ai [--port 8765]  # ダッシュボードをブラウザで配信、更新ボタン付き
+  python main.py serve     --account rakuba_ai [--port 8765] [--host 0.0.0.0]  # ダッシュボードをブラウザで配信、更新ボタン付き
 
   python main.py reply-scout scout     --account rakuba_ai   # 候補収集+スコアリング
   python main.py reply-scout draft     --account rakuba_ai   # リプライ下書き生成（config/keywords.jsonのrakuba_output_dirを参照）
@@ -136,6 +136,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve_p = sub.add_parser("serve")
     serve_p.add_argument("--account", required=True, help="config/accounts.yaml で定義したアカウント名")
     serve_p.add_argument("--port", type=int, default=8765)
+    serve_p.add_argument(
+        "--host", default="127.0.0.1",
+        help="待ち受けアドレス（既定はこのPCのみ。Tailscale経由で開くなら 0.0.0.0）",
+    )
     serve_p.add_argument("--no-browser", action="store_true", help="ブラウザを自動で開かない")
 
     reply_scout_p = sub.add_parser("reply-scout")
@@ -173,7 +177,7 @@ def main(argv: list[str] | None = None) -> None:
         from postdoctor.server import serve
 
         account = get_account(args.account)
-        serve(account, port=args.port, open_browser=not args.no_browser)
+        serve(account, port=args.port, open_browser=not args.no_browser, host=args.host)
         return
 
     if args.command == "reply-scout":

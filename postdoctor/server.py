@@ -184,13 +184,19 @@ def _make_handler(account: Account) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def serve(account: Account, port: int = 8765, open_browser: bool = True) -> None:
+def serve(
+    account: Account, port: int = 8765, open_browser: bool = True, host: str = "127.0.0.1"
+) -> None:
+    """hostは待ち受けアドレス。既定はこのPCからのみ。常駐serveはTailscale経由で
+    スマホから開くため 0.0.0.0 で待ち受け、LANからの接続はファイアウォール規則
+    "PostDoctor: block 8765 except Tailscale" で遮断する（2026-10-24）。
+    表示・ブラウザで開くURLは待ち受けアドレスに関係なく常に127.0.0.1。"""
     configure_file_logging(serve_log_path(account))
     df = add_derived_columns(load_posts_df(account))
     text = generate_prescription(df, account)
     generate_dashboard(df, account, text)
 
-    server = ThreadingHTTPServer(("127.0.0.1", port), _make_handler(account))
+    server = ThreadingHTTPServer((host, port), _make_handler(account))
     url = f"http://127.0.0.1:{port}/"
     print(f"[{account.name}] {url} でダッシュボードを配信中... (Ctrl+C で停止)")
     if open_browser:
